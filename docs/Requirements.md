@@ -3,38 +3,38 @@
 ## Constraints
 
 - Correct usage of
-    - `mbuf` lifecycle
-    - EAL
-    - mempools
-    - `ethdev`
-    - rte_ring
+  - `mbuf` lifecycle
+  - EAL
+  - mempools
+  - `ethdev`
+  - rte_ring
 - C11
 - DPDK >= 22.11
 - multi-core. At least 2.
 
 ## Deliverables
 
-- 1 executable: `mini_dpi`
-  - Source code
-  - CMake files
-  - README
-    - exact build commands
-    - exact run commands
-      - EAL args
-      - vdev examples
-  - Short implementation notes
-    - where drops occur
-    - why drops occur
-    - how re-assembly is implemented
-    - mbuf lifecycle decisions
-    - Use of AI
-      - Type
-        - Category
-        - Name
-      - Usage Methodology
-      - Generated Deliverables
-        - mention involvement level
-- Performance Test
+- [ ] 1 executable: `mini_dpi`
+  - [ ] Source code
+- [X] CMake files
+- [ ] README
+  - [ ] exact build commands
+  - [ ] exact run commands
+    - [ ] EAL args
+    - [ ] vdev examples
+- [ ] Short implementation notes
+  - [ ] where drops occur
+  - [ ] why drops occur
+  - [ ] how re-assembly is implemented
+  - [ ] mbuf lifecycle decisions
+  - [ ] Use of AI
+    - [ ] Type
+      - [ ] Category
+      - [ ] Name
+    - [ ] Usage Methodology
+    - [ ] Generated Deliverables
+      - [ ] mention involvement level
+- [ ] Performance Test
 
 ## Flow
 
@@ -105,7 +105,7 @@
 - maximum achievable throughput
 - Using `rte_rdtsc()`
 - Output:
-    - pps
-    - Gbps
-    - Average latency b/w input packet and classification counter increment in microseconds
+  - pps
+  - Gbps
+  - Average latency b/w input packet and classification counter increment in microseconds
 - Test with >= 1 Million packets. Loop or synthesize
