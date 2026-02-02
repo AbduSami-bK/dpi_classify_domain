@@ -26,6 +26,7 @@ find_package(PkgConfig REQUIRED)
 # DPDK
 # --------------------------------
 pkg_check_modules(DPDK REQUIRED IMPORTED_TARGET libdpdk)
+
 if(NOT DPDK_FOUND)
 	message(FATAL_ERROR "no installation of DPDK found")
 endif()
@@ -44,6 +45,7 @@ function(add_dpdk_executable link_static)
 	else()
 		set(target_suffix "shared")
 	endif()
+
 	set(target_name "${PROJECT_NAME}-${target_suffix}")
 	message(STATUS "Creating target: ${target_name}")
 
@@ -62,6 +64,7 @@ function(add_dpdk_executable link_static)
 		target_link_libraries(${target_name} PRIVATE PkgConfig::DPDK)
 		message(STATUS "Linking ${target_name} dynamically with DPDK")
 	endif()
+
 	target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_TARGET})
 	target_compile_definitions(${target_name} PRIVATE ALLOW_EXPERIMENTAL_API)
 
@@ -86,12 +89,12 @@ endfunction()
 if(BUILD_SHARED)
 	add_dpdk_executable(FALSE)
 	add_custom_target(shared DEPENDS "${PROJECT_NAME}-shared")
-    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY DEFAULT_TARGET "${PROJECT_NAME}-shared")
+	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY DEFAULT_TARGET "${PROJECT_NAME}-shared")
 endif()
 
 if(BUILD_STATIC)
 	add_dpdk_executable(TRUE)
 	add_custom_target(static DEPENDS "${PROJECT_NAME}-static")
-    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY DEFAULT_TARGET "${PROJECT_NAME}-static")
+	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY DEFAULT_TARGET "${PROJECT_NAME}-static")
 endif()
 # --------------------------------

@@ -80,7 +80,7 @@
             1. case "google.com": ++Google
             2. case "youtube.com": ++YouTube
             3. case "facebook.com": ++Facebook
-            4. case "github.com": GitHub
+            4. case "github.com": ++GitHub
             5. default: ++Unknown
         3. Do not copy payload
         4. Handle multi-segment mbufs

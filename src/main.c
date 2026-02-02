@@ -1,7 +1,9 @@
 // By ChatGPT 5.2
+#include <inttypes.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <signal.h>
+#include <string.h>
 #include <sys/types.h> // for ssize_t
 
 #include <rte_cycles.h>
@@ -16,6 +18,11 @@
 #define BURST_SIZE   32
 
 static volatile bool force_quit = false;
+static volatile uint64_t Google = 0,
+                        YouTube = 0,
+                        FaceBook = 0,
+                        GitHub = 0,
+                        UnKnown = 0;
 
 static void
 signal_handler(int signum)
@@ -74,30 +81,39 @@ main(int argc, char **argv)
 
     printf("Started RX loop on port %u\n", port_id);
 
+    uint64_t t0 = rte_rdtsc();
+
     while (!force_quit) {
         struct rte_mbuf *pkts[BURST_SIZE];
         uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, pkts, BURST_SIZE);
 
-        if (nb_rx == 0)
+        if (nb_rx == 0) {
             continue;
+        }
 
         for (uint16_t i = 0; i < nb_rx; i++) {
             struct rte_mbuf *m = pkts[i];
 
-            /* === THIS IS YOUR ENTRY POINT === */
-
             uint8_t *data = rte_pktmbuf_mtod(m, uint8_t *);
             uint16_t len  = rte_pktmbuf_pkt_len(m);
 
-            /* You now have a pointer to packet bytes */
-            (void)data;
-            (void)len;
+            bool found = false;
+            if (memmem(data, (len < 256 ? len : 256), "google.com", sizeof ("google.com"))) {   ++Google;   found = true;   }
+            if (memmem(data, (len < 256 ? len : 256), "youtube.com", sizeof ("youtube.com"))) { ++YouTube;  found = true;   }
+            if (memmem(data, (len < 256 ? len : 256), "facebook.com", sizeof ("facebook.com"))) {   ++FaceBook; found = true;   }
+            if (memmem(data, (len < 256 ? len : 256), "github.com", sizeof ("github.com"))) {   ++GitHub;   found = true;   }
+            if (!found) ++UnKnown;
 
-            /* === END OF YOUR LOGIC === */
+        }
+        rte_pktmbuf_free_bulk(pkts, nb_rx);  // ALWAYS FREE
 
-            rte_pktmbuf_free(m);  // ALWAYS FREE
+        uint64_t t1 = rte_rdtsc();
+        if ((t1 - t0) > 1000) {
+            printf("Google:%lu\tYT:%lu\tFB:%lu\tGitHub:%lu\tUnmatched:%lu\n", Google, YouTube, FaceBook, GitHub, UnKnown);
+            t0 = t1;
         }
     }
+    printf("Google:%lu\tYT:%lu\tFB:%lu\tGitHub:%lu\tUnmatched:%lu\n", Google, YouTube, FaceBook, GitHub, UnKnown);
 
     rte_eth_dev_stop(port_id);
     rte_eth_dev_close(port_id);
