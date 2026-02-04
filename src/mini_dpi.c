@@ -48,7 +48,7 @@ signal_handler(int signum)
 static void
 print_usage(const char *prog)
 {
-    printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--frag-timeout-ms N] [--print-max N] [--debug-dump N]\n", prog);
+    printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--frag-timeout-ms N] [--print-max N] [--print-payloads] [--debug-dump N]\n", prog);
 }
 
 static int
@@ -60,6 +60,7 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
         {"list-ports", no_argument, NULL, 'l'},
         {"frag-timeout-ms", required_argument, NULL, 't'},
         {"print-max", required_argument, NULL, 'm'},
+        {"print-payloads", no_argument, NULL, 'P'},
         {"debug-dump", required_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0}
@@ -85,6 +86,9 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
             break;
         case 'm':
             cfg->max_print_bytes = (uint32_t)atoi(optarg);
+            break;
+        case 'P':
+            cfg->print_payloads = true;
             break;
         case 'd':
             cfg->debug_dump_limit = (uint32_t)atoi(optarg);
@@ -175,6 +179,7 @@ main(int argc, char **argv)
         .debug_dump_limit = 0,
         .auto_port = false,
         .list_ports = false,
+        .print_payloads = false,
     };
 
     struct app_stats stats;
@@ -243,6 +248,7 @@ main(int argc, char **argv)
         .payload_pool = payload_pool,
         .stats = &stats,
         .max_print_bytes = cfg.max_print_bytes,
+        .print_payloads = cfg.print_payloads,
     };
 
     unsigned int rx_lcore = 1;
@@ -255,6 +261,7 @@ main(int argc, char **argv)
 
     printf("Reassembly reader started on port %u\n", cfg.port_id);
     printf("frag-timeout-ms=%u, print-max=%u bytes\n", cfg.frag_timeout_ms, cfg.max_print_bytes);
+    printf("payload_print=%s\n", cfg.print_payloads ? "on" : "off");
     if (cfg.debug_dump_limit > 0)
         printf("debug-dump enabled: max %" PRIu32 " packets for non-IPv4 packets\n", cfg.debug_dump_limit);
 

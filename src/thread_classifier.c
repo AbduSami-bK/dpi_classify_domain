@@ -243,18 +243,20 @@ thread_classifier_main(void *arg)
                                        item->payload_offset, item->payload_len,
                                        ctx->stats);
 
-            if (item->proto == IPPROTO_TCP)
-                printf("TCP payload_len=%" PRIu32 ": ", item->payload_len);
-            else if (item->proto == IPPROTO_UDP)
-                printf("UDP payload_len=%" PRIu32 ": ", item->payload_len);
-            else
-                printf("L4 payload_len=%" PRIu32 ": ", item->payload_len);
+            if (ctx->print_payloads) {
+                if (item->proto == IPPROTO_TCP)
+                    printf("TCP payload_len=%" PRIu32 ": ", item->payload_len);
+                else if (item->proto == IPPROTO_UDP)
+                    printf("UDP payload_len=%" PRIu32 ": ", item->payload_len);
+                else
+                    printf("L4 payload_len=%" PRIu32 ": ", item->payload_len);
 
-            if (item->payload_len > 0)
-                print_payload_range(item->mbuf, item->payload_offset,
-                                    item->payload_len, ctx->max_print_bytes);
-            else
-                putchar('\n');
+                if (item->payload_len > 0)
+                    print_payload_range(item->mbuf, item->payload_offset,
+                                        item->payload_len, ctx->max_print_bytes);
+                else
+                    putchar('\n');
+            }
 
             rte_pktmbuf_free(item->mbuf);
             rte_mempool_put(ctx->payload_pool, item);
