@@ -1,5 +1,4 @@
-// DPDK IPv4 reassembly + TCP/UDP payload printer
-// Focused, minimal program for pcap/af_packet ingestion.
+// DPDK IPv4 reassembly
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -11,6 +10,7 @@
 #include <string.h>
 #include <sys/types.h>
 
+#include <rte_atomic.h>
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_cycles.h>
@@ -22,31 +22,22 @@
 #include <rte_ip_frag.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
+#include <rte_ring.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
+
+#include "thread_rx.h"
 
 #define RX_RING_SIZE 1024
 #define NUM_MBUFS    8192
 #define MBUF_CACHE   256
-#define BURST_SIZE   32
 
-#define FRAG_BUCKETS  1024
-#define FRAG_BUCKET_ENTRIES 16
-#define FRAG_MAX_FLOWS 4096
 #define DEFAULT_FRAG_TIMEOUT_MS 30000
 
 #define DEFAULT_MAX_PRINT 1024
+#define RX_TO_WORKER_RING_SIZE 4096
 
-static volatile bool force_quit = false;
-
-struct app_cfg {
-    uint16_t port_id;
-    uint32_t frag_timeout_ms;
-    uint32_t max_print_bytes;
-    uint32_t debug_dump_limit;
-    bool auto_port;
-    bool list_ports;
-};
+volatile bool force_quit = false;
 
 static void
 signal_handler(int signum)
@@ -57,7 +48,7 @@ signal_handler(int signum)
 }
 
 static void
-usage(const char *prog)
+print_usage(const char *prog)
 {
     printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--frag-timeout-ms N] [--print-max N] [--debug-dump N]\n", prog);
 }
@@ -102,7 +93,7 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
             break;
         case 'h':
         default:
-            usage(argv[0]);
+            print_usage(argv[0]);
             return -1;
         }
     }
@@ -138,7 +129,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
     return 0;
 }
 
-static int
+int
 get_ipv4_hdr(struct rte_mbuf *m, struct rte_ipv4_hdr **ip_hdr, uint32_t *l2_len)
 {
     uint8_t *data = rte_pktmbuf_mtod(m, uint8_t *);
@@ -218,7 +209,7 @@ print_payload(struct rte_mbuf *m, uint32_t offset, uint32_t len, uint32_t max_pr
     putchar('\n');
 }
 
-static void
+void
 handle_l4_and_print(struct rte_mbuf *m, struct rte_ipv4_hdr *ip_hdr, uint32_t l2_len, uint32_t max_print)
 {
     uint8_t ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
@@ -318,7 +309,7 @@ select_auto_port(uint16_t *out_port)
     return -1;
 }
 
-static void
+void
 dump_first_bytes(struct rte_mbuf *m, uint32_t max_bytes)
 {
     uint32_t len = rte_pktmbuf_pkt_len(m);
@@ -354,6 +345,12 @@ main(int argc, char **argv)
         .list_ports = false,
     };
 
+    struct app_stats stats;
+    rte_atomic64_init(&stats.rx_pkts);
+    rte_atomic64_init(&stats.rx_drop);
+    rte_atomic64_init(&stats.worker_in);
+    rte_atomic64_init(&stats.worker_out);
+
     int ret = rte_eal_init(argc, argv);
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "EAL init failed\n");
@@ -385,95 +382,64 @@ main(int argc, char **argv)
     if (port_init(cfg.port_id, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu16 "\n", cfg.port_id);
 
-    uint64_t tsc_hz = rte_get_tsc_hz();
-    uint64_t frag_cycles = (tsc_hz / 1000) * cfg.frag_timeout_ms;
+    struct rte_ring *ring = rte_ring_create(
+        "rx_to_worker", RX_TO_WORKER_RING_SIZE,
+        rte_socket_id(), RING_F_SC_DEQ);
+    if (ring == NULL)
+        rte_exit(EXIT_FAILURE, "Cannot create ring: %s\n", rte_strerror(errno));
 
-    struct rte_ip_frag_tbl *frag_tbl = rte_ip_frag_table_create(
-        FRAG_BUCKETS, FRAG_BUCKET_ENTRIES, FRAG_MAX_FLOWS,
-        frag_cycles, rte_socket_id());
-    if (frag_tbl == NULL)
-        rte_exit(EXIT_FAILURE, "Cannot create frag table: %s\n", rte_strerror(errno));
+    struct worker_ctx wctx = {
+        .ring = ring,
+        .cfg = cfg,
+        .stats = &stats,
+        .frag_tbl = NULL,
+    };
 
-    struct rte_ip_frag_death_row death_row;
-    memset(&death_row, 0, sizeof(death_row));
+    unsigned int worker_lcore = 1;
+    if (!rte_lcore_is_enabled(worker_lcore))
+        rte_exit(EXIT_FAILURE, "lcore %u is not enabled; use -l 0-1\n", worker_lcore);
+
+    rte_eal_remote_launch(worker_main, &wctx, worker_lcore);
 
     printf("Reassembly reader started on port %u\n", cfg.port_id);
     printf("frag-timeout-ms=%u, print-max=%u bytes\n", cfg.frag_timeout_ms, cfg.max_print_bytes);
     if (cfg.debug_dump_limit > 0)
         printf("debug-dump enabled: max %" PRIu32 " packets for non-IPv4 packets\n", cfg.debug_dump_limit);
 
+    uint64_t last_tsc = rte_get_tsc_cycles();
+    uint64_t tsc_hz = rte_get_tsc_hz();
+
     while (!force_quit) {
         struct rte_mbuf *pkts[BURST_SIZE];
         uint16_t nb_rx = rte_eth_rx_burst(cfg.port_id, 0, pkts, BURST_SIZE);
 
         if (nb_rx == 0) {
-            rte_delay_us_sleep(1000);
-            continue;
+            rte_delay_us_sleep(100);
+        } else {
+            rte_atomic64_add(&stats.rx_pkts, nb_rx);
+
+            uint16_t enq = rte_ring_enqueue_burst(ring, (void **)pkts, nb_rx, NULL);
+            if (enq < nb_rx) {
+                uint16_t drop = nb_rx - enq;
+                rte_atomic64_add(&stats.rx_drop, drop);
+                for (uint16_t i = enq; i < nb_rx; i++)
+                    rte_pktmbuf_free(pkts[i]);
+            }
         }
 
-        for (uint16_t i = 0; i < nb_rx; i++) {
-            struct rte_mbuf *m = pkts[i];
-            struct rte_ipv4_hdr *ip_hdr = NULL;
-            uint32_t l2_len = 0;
-
-            if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
-                if (cfg.debug_dump_limit > 0) {
-                    static uint32_t dumped = 0;
-                    if (dumped < cfg.debug_dump_limit) {
-                        dump_first_bytes(m, 64);
-                        dumped++;
-                    }
-                }
-                printf("pkt: not ipv4\n");
-                rte_pktmbuf_free(m);
-                continue;
-            }
-
-            uint8_t ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
-            if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
-                printf("pkt: ipv4 header invalid\n");
-                rte_pktmbuf_free(m);
-                continue;
-            }
-
-            m->l2_len = (uint16_t)l2_len;
-            m->l3_len = ihl_bytes;
-
-            if (rte_ipv4_frag_pkt_is_fragmented(ip_hdr)) {
-                struct rte_mbuf *reassembled = rte_ipv4_frag_reassemble_packet(
-                    frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip_hdr);
-
-                if (reassembled == NULL)
-                    continue; // fragment queued or dropped; mbuf consumed
-
-                m = reassembled;
-
-                if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
-                    printf("reassembled pkt: not ipv4\n");
-                    rte_pktmbuf_free(m);
-                    continue;
-                }
-
-                ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
-                if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
-                    printf("reassembled pkt: ipv4 header invalid\n");
-                    rte_pktmbuf_free(m);
-                    continue;
-                }
-
-                m->l2_len = (uint16_t)l2_len;
-                m->l3_len = ihl_bytes;
-            }
-
-            handle_l4_and_print(m, ip_hdr, l2_len, cfg.max_print_bytes);
-            rte_pktmbuf_free(m);
+        uint64_t now = rte_get_tsc_cycles();
+        if (now - last_tsc >= tsc_hz) {
+            uint64_t rx = rte_atomic64_read(&stats.rx_pkts);
+            uint64_t drop = rte_atomic64_read(&stats.rx_drop);
+            uint64_t win = rte_atomic64_read(&stats.worker_in);
+            uint64_t wout = rte_atomic64_read(&stats.worker_out);
+            printf("rx=%" PRIu64 " drop=%" PRIu64 " worker_in=%" PRIu64 " worker_out=%" PRIu64 "\n",
+                   rx, drop, win, wout);
+            last_tsc = now;
         }
-
-        rte_ip_frag_free_death_row(&death_row, BURST_SIZE);
     }
 
-    rte_ip_frag_free_death_row(&death_row, BURST_SIZE);
-    rte_ip_frag_table_destroy(frag_tbl);
+    rte_eal_wait_lcore(worker_lcore);
 
     rte_eth_dev_stop(cfg.port_id);
     rte_eth_dev_close(cfg.port_id);

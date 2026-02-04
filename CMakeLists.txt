@@ -95,7 +95,7 @@ endif()
 # endif()
 
 # SET(APP "mini_dpi")
-set(SRCS-y "src/mini_dpi.c")
+set(SRCS-y "src/mini_dpi.c" "src/thread_rx.c")
 
 # Function to create executable with specific linking
 function(add_dpdk_executable link_static)
@@ -114,7 +114,7 @@ function(add_dpdk_executable link_static)
 	target_include_directories(${target_name}
 		PRIVATE
 
-		# ${CMAKE_SOURCE_DIR}/include
+		${CMAKE_SOURCE_DIR}/include
 		# ${CMAKE_BINARY_DIR}/generated
 		${DPDK_INCLUDE_DIRS}
 
