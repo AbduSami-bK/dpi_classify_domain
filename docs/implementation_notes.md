@@ -29,6 +29,13 @@ Thread_print: Print stats periodically. -> Merged with main thread.
 
 ## AI involvement
 
+- Type
+  - Category
+  - Name
+- Usage Methodology
+- Generated Deliverables
+  - mention involvement level
+
 | S.No. | Tool Type | Name | Generated Content in | Methodology / Involvement level |
 | -- | -- | --- | --- | ----- |
 | 1. | Chatbot | ChatGPT 5.2 | main.c | Generate a simple skeleton DPDK app to start working |

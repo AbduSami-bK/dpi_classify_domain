@@ -19,8 +19,67 @@ set(CMAKE_C_FLAGS_RELEASE "-O3")
 set(OUTPUT_DIR ${CMAKE_BINARY_DIR}/build)
 file(MAKE_DIRECTORY ${OUTPUT_DIR})
 
+# # Auto-Version file
+# if(EXISTS ${CMAKE_SOURCE_DIR}/.git)
+# execute_process(
+# COMMAND git describe --tags --always --dirty
+# WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+# OUTPUT_VARIABLE GIT_HASH
+# OUTPUT_STRIP_TRAILING_WHITESPACE
+# ERROR_QUIET
+# )
+# endif()
+# file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+# if(EXISTS ${CMAKE_SOURCE_DIR}/include/version.h.in)
+# configure_file(
+# ${CMAKE_SOURCE_DIR}/include/version.h.in
+# ${CMAKE_BINARY_DIR}/generated/version.h
+# @ONLY
+# )
+# endif()
+
 # Find pkg-config
 find_package(PkgConfig REQUIRED)
+
+# --------------------------------
+# HyperScan
+# --------------------------------
+## Help from https://cliutils.gitlab.io/modern-cmake/chapters/projects/submodule.html
+find_package(Git QUIET)
+
+# if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+# 	option(GIT_SUBMODULE "Check submodules during build" ON)
+
+# 	if(GIT_SUBMODULE)
+# 		message(STATUS "Checking HyperScan submodule...")
+
+# 		if(NOT EXISTS "${CMAKE_SOURCE_DIR}/hyperscan/CMakeLists.txt")
+# 			message(STATUS "Initializing Hyperscan submodule...")
+# 			execute_process(
+# 				COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+# 				WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+# 				RESULT_VARIABLE GIT_SUBMOD_RESULT
+# 			)
+
+# 			if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+# 				message(WARNING "git submodule update failed. HyperScan may not be available.")
+# 			endif()
+# 		endif()
+# 	endif()
+# endif()
+
+# if(NOT EXISTS "${PROJECT_SOURCE_DIR}/hyperscan/CMakeLists.txt")
+# 	message(FATAL_ERROR "The submodules were not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
+# endif()
+
+# add_subdirectory(hyperscan)
+# if(TARGET hs)
+# 	set(HYPERSCAN_TARGET hs)
+# elseif(TARGET hs_shared)
+# 	set(HYPERSCAN_TARGET hs_shared)
+# elseif(TARGET hs_static)
+# 	set(HYPERSCAN_TARGET hs_static)
+# endif()
 
 # --------------------------------
 # DPDK
@@ -54,7 +113,12 @@ function(add_dpdk_executable link_static)
 	# Include
 	target_include_directories(${target_name}
 		PRIVATE
-			${DPDK_INCLUDE_DIRS}
+
+		# ${CMAKE_SOURCE_DIR}/include
+		# ${CMAKE_BINARY_DIR}/generated
+		${DPDK_INCLUDE_DIRS}
+
+		# ${CMAKE_SOURCE_DIR}/hyperscan/include
 	)
 
 	if(link_static)
@@ -65,7 +129,7 @@ function(add_dpdk_executable link_static)
 		message(STATUS "Linking ${target_name} dynamically with DPDK")
 	endif()
 
-	target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_TARGET})
+	# target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_TARGET})
 	target_compile_definitions(${target_name} PRIVATE ALLOW_EXPERIMENTAL_API)
 
 	# Set output directory
@@ -97,4 +161,9 @@ if(BUILD_STATIC)
 	add_custom_target(static DEPENDS "${PROJECT_NAME}-static")
 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY DEFAULT_TARGET "${PROJECT_NAME}-static")
 endif()
-# --------------------------------
+
+# enable_testing()
+# include(CTest)
+# add_executable(unit_tests test/unit_tests.c)
+# target_link_libraries(tests ${DPDK_LIBRARIES})
+# add_test(NAME unit_test COMMAND ./test/unit_tests -l 0-2 --vdev 'net_pcap0,rx_pcap=test/in.pcap')

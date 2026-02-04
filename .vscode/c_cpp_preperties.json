@@ -1,0 +1,49 @@
+{
+	"configurations" : [
+		{
+			"name": "Rocky9",
+			"includePath": [
+				"${workspaceFolder}/include",
+				"${workspaceFolder}/hyperscan/include",
+			],
+			"cStandard": "c11"
+		},
+		{
+			"name": "windows-gcc-x64",
+			"includePath": [
+				"${workspaceFolder}/**"
+			],
+			"defines": [
+				"_DEBUG",
+				"UNICODE",
+				"_UNICODE"
+			],
+			"windowsSdkVersion": "10.0.18362.0",
+			"compilerPath": "gcc",
+			"cStandard": "${default}",
+			"cppStandard": "${default}",
+			"intelliSenseMode": "windows-gcc-x64",
+			"compilerArgs": [
+				""
+			],
+			"configurationProvider": "ms-vscode.makefile-tools"
+		},
+		{
+			"name": "CentOS7",
+			"includePath": [
+				"${workspaceFolder}/**"
+			],
+			"defines": [
+				"_DEBUG",
+				"UNICODE",
+				"_UNICODE"
+			],
+			"windowsSdkVersion": "10.0.18362.0",
+			"compilerPath": "C:/cygwin64/bin/g++.exe",
+			"cStandard": "c11",
+			"cppStandard": "c++17",
+			"intelliSenseMode": "gcc-x64"
+		}
+	],
+	"version": 4
+}
