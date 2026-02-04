@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../dpdk-stable"
+		}
+	],
+	"settings": {
+		"chatgpt.commentCodeLensEnabled": false
+	}
+}

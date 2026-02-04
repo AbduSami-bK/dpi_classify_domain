@@ -1,4 +1,4 @@
-// By ChatGPT 5.2
+// With help from ChatGPT 5.2
 #include <inttypes.h>
 #include <signal.h>
 #include <stdint.h>
@@ -95,7 +95,7 @@ main(int argc, char **argv)
             struct rte_mbuf *m = pkts[i];
 
             uint8_t *data = rte_pktmbuf_mtod(m, uint8_t *);
-            uint16_t len  = rte_pktmbuf_pkt_len(m);
+            uint16_t len = rte_pktmbuf_pkt_len(m);
 
             bool found = false;
             if (memmem(data, (len < 256 ? len : 256), "google.com", sizeof ("google.com"))) {   ++Google;   found = true;   }
@@ -105,15 +105,15 @@ main(int argc, char **argv)
             if (!found) ++UnKnown;
 
         }
-        rte_pktmbuf_free_bulk(pkts, nb_rx);  // ALWAYS FREE
+        rte_pktmbuf_free_bulk(pkts, nb_rx);
 
         uint64_t t1 = rte_rdtsc();
-        if ((t1 - t0) > 1000) {
+        if ((t1 - t0) > 3000) {
             printf("Google:%lu\tYT:%lu\tFB:%lu\tGitHub:%lu\tUnmatched:%lu\n", Google, YouTube, FaceBook, GitHub, UnKnown);
             t0 = t1;
         }
     }
-    printf("Google:%lu\tYT:%lu\tFB:%lu\tGitHub:%lu\tUnmatched:%lu\n", Google, YouTube, FaceBook, GitHub, UnKnown);
+    printf("\nGoogle:%lu\tYT:%lu\tFB:%lu\tGitHub:%lu\tUnmatched:%lu\n", Google, YouTube, FaceBook, GitHub, UnKnown);
 
     rte_eth_dev_stop(port_id);
     rte_eth_dev_close(port_id);

@@ -1,7 +1,7 @@
 # With Help from DeepSeek
 cmake_minimum_required(VERSION 3.26)
 
-project(dpi_classify_domain
+project(mini_dpi
 	LANGUAGES C
 	DESCRIPTION "Classify IPv4 packets based on FQDN sub-string search from the payload"
 )

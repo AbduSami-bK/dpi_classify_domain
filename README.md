@@ -41,8 +41,8 @@ Tested with vfio_pci on "82540EM Gigabit Ethernet Controller 100e" by libvirtd (
         1. Reboot
     3. Bind interfaces.
 3. `mkdir build`
-4. `cmake -b build`
 5. `cd build`
+4. `cmake -G Ninja ..`
 6. `ninja`
 
 ## How to run
