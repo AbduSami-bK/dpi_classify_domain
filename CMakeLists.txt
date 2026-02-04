@@ -95,7 +95,7 @@ endif()
 # endif()
 
 # SET(APP "mini_dpi")
-set(SRCS-y "src/main.c")
+set(SRCS-y "src/mini_dpi.c")
 
 # Function to create executable with specific linking
 function(add_dpdk_executable link_static)
