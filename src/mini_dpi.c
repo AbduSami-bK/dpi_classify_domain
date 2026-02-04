@@ -1,4 +1,4 @@
-// DPDK IPv4 reassembly
+// Mini DPI main: RX on lcore 0, worker on lcore 1
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -11,31 +11,29 @@
 #include <sys/types.h>
 
 #include <rte_atomic.h>
-#include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
-#include <rte_ether.h>
-#include <rte_ip.h>
-#include <rte_ip_frag.h>
+#include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
-#include <rte_tcp.h>
-#include <rte_udp.h>
 
+#include "app_common.h"
+#include "fqdn_list.h"
 #include "thread_rx.h"
+#include "thread_classifier.h"
 
 #define RX_RING_SIZE 1024
 #define NUM_MBUFS    8192
 #define MBUF_CACHE   256
 
 #define DEFAULT_FRAG_TIMEOUT_MS 30000
-
 #define DEFAULT_MAX_PRINT 1024
-#define RX_TO_WORKER_RING_SIZE 4096
+#define RX_TO_CLASSIFIER_RING_SIZE 4096
+#define PAYLOAD_POOL_SIZE 8192
 
 volatile bool force_quit = false;
 
@@ -101,6 +99,44 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
     return 0;
 }
 
+static void
+list_ports(void)
+{
+    uint16_t nb_ports = rte_eth_dev_count_avail();
+    printf("Available ports: %u\n", nb_ports);
+    for (uint16_t port = 0; port < nb_ports; port++) {
+        struct rte_eth_dev_info info;
+        char name[RTE_ETH_NAME_MAX_LEN] = {0};
+        if (rte_eth_dev_get_name_by_port(port, name) != 0)
+            snprintf(name, sizeof(name), "port%u", port);
+        if (rte_eth_dev_info_get(port, &info) != 0)
+            snprintf(name, sizeof(name), "port%u", port);
+        printf("  port %u: name=%s driver=%s\n",
+               port, name, info.driver_name ? info.driver_name : "unknown");
+    }
+}
+
+static int
+select_auto_port(uint16_t *out_port)
+{
+    uint16_t nb_ports = rte_eth_dev_count_avail();
+    for (uint16_t port = 0; port < nb_ports; port++) {
+        struct rte_eth_dev_info info;
+        char name[RTE_ETH_NAME_MAX_LEN] = {0};
+        if (rte_eth_dev_get_name_by_port(port, name) != 0)
+            name[0] = '\0';
+        if (rte_eth_dev_info_get(port, &info) != 0)
+            continue;
+
+        if ((info.driver_name && strstr(info.driver_name, "pcap")) ||
+            (name[0] != '\0' && strstr(name, "pcap"))) {
+            *out_port = port;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int
 port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
@@ -130,210 +166,6 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 }
 
 int
-get_ipv4_hdr(struct rte_mbuf *m, struct rte_ipv4_hdr **ip_hdr, uint32_t *l2_len)
-{
-    uint8_t *data = rte_pktmbuf_mtod(m, uint8_t *);
-    uint32_t pkt_len = rte_pktmbuf_pkt_len(m);
-
-    if (pkt_len < sizeof(struct rte_ipv4_hdr))
-        return -1;
-
-    if ((data[0] >> 4) == 4) {
-        *l2_len = 0;
-        *ip_hdr = (struct rte_ipv4_hdr *)data;
-        return 0;
-    }
-
-    if (pkt_len >= sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)) {
-        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)data;
-        uint16_t etype = rte_be_to_cpu_16(eth->ether_type);
-        if (etype == RTE_ETHER_TYPE_IPV4) {
-            *l2_len = sizeof(struct rte_ether_hdr);
-            *ip_hdr = (struct rte_ipv4_hdr *)(data + sizeof(struct rte_ether_hdr));
-            return 0;
-        }
-    }
-
-    /* Heuristic scan: handle pcap variants with small per-packet prefixes. */
-    uint32_t max_scan = RTE_MIN(pkt_len - (uint32_t)sizeof(struct rte_ipv4_hdr), 32u);
-    for (uint32_t off = 0; off <= max_scan; off++) {
-        struct rte_ipv4_hdr *cand = (struct rte_ipv4_hdr *)(data + off);
-        if ((cand->version_ihl >> 4) != 4)
-            continue;
-        uint8_t ihl = (uint8_t)((cand->version_ihl & 0x0F) * 4);
-        if (ihl < sizeof(struct rte_ipv4_hdr))
-            continue;
-        uint16_t tot = rte_be_to_cpu_16(cand->total_length);
-        if (tot < ihl)
-            continue;
-        if (off + tot > pkt_len)
-            continue;
-        *l2_len = off;
-        *ip_hdr = cand;
-        return 0;
-    }
-
-    return -1;
-}
-
-static void
-print_payload(struct rte_mbuf *m, uint32_t offset, uint32_t len, uint32_t max_print)
-{
-    uint32_t to_print = len;
-    if (max_print > 0 && to_print > max_print)
-        to_print = max_print;
-
-    uint8_t scratch[64];
-    uint32_t printed = 0;
-
-    while (printed < to_print) {
-        uint32_t chunk = RTE_MIN((uint32_t)sizeof(scratch), to_print - printed);
-        if (rte_pktmbuf_read(m, offset + printed, chunk, scratch) == NULL) {
-            printf("[payload read error]\n");
-            return;
-        }
-
-        for (uint32_t i = 0; i < chunk; i++) {
-            unsigned char c = scratch[i];
-            if (c >= 32 && c <= 126)
-                putchar(c);
-            else
-                printf(".%02x", c);
-        }
-        printed += chunk;
-    }
-
-    if (len > to_print)
-        printf(" ... (%" PRIu32 " bytes total)", len);
-
-    putchar('\n');
-}
-
-void
-handle_l4_and_print(struct rte_mbuf *m, struct rte_ipv4_hdr *ip_hdr, uint32_t l2_len, uint32_t max_print)
-{
-    uint8_t ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
-    uint16_t ip_total_len = rte_be_to_cpu_16(ip_hdr->total_length);
-
-    if (ihl_bytes < sizeof(struct rte_ipv4_hdr) || ip_total_len < ihl_bytes) {
-        printf("IPv4 header invalid\n");
-        return;
-    }
-
-    uint32_t l3_len = ip_total_len;
-    uint32_t l4_offset = l2_len + ihl_bytes;
-    uint32_t l4_len = l3_len - ihl_bytes;
-    uint8_t proto = ip_hdr->next_proto_id;
-
-    if (proto == IPPROTO_TCP) {
-        struct rte_tcp_hdr tcp_hdr;
-        if (rte_pktmbuf_read(m, l4_offset, sizeof(tcp_hdr), &tcp_hdr) == NULL) {
-            printf("TCP header read failed\n");
-            return;
-        }
-
-        uint8_t tcp_hdr_len = (uint8_t)(((tcp_hdr.data_off & 0xF0) >> 4) * 4);
-        if (tcp_hdr_len < sizeof(struct rte_tcp_hdr) || l4_len < tcp_hdr_len) {
-            printf("TCP header invalid\n");
-            return;
-        }
-
-        uint32_t payload_offset = l4_offset + tcp_hdr_len;
-        uint32_t payload_len = l4_len - tcp_hdr_len;
-
-        printf("TCP payload_len=%" PRIu32 ": ", payload_len);
-        if (payload_len > 0)
-            print_payload(m, payload_offset, payload_len, max_print);
-        else
-            putchar('\n');
-    } else if (proto == IPPROTO_UDP) {
-        struct rte_udp_hdr udp_hdr;
-        if (rte_pktmbuf_read(m, l4_offset, sizeof(udp_hdr), &udp_hdr) == NULL) {
-            printf("UDP header read failed\n");
-            return;
-        }
-
-        uint16_t udp_len = rte_be_to_cpu_16(udp_hdr.dgram_len);
-        if (udp_len < sizeof(struct rte_udp_hdr) || l4_len < sizeof(struct rte_udp_hdr)) {
-            printf("UDP header invalid\n");
-            return;
-        }
-
-        uint32_t payload_offset = l4_offset + sizeof(struct rte_udp_hdr);
-        uint32_t ip_payload_len = l4_len - sizeof(struct rte_udp_hdr);
-        uint32_t payload_len = RTE_MIN((uint32_t)(udp_len - sizeof(struct rte_udp_hdr)), ip_payload_len);
-
-        printf("UDP payload_len=%" PRIu32 ": ", payload_len);
-        if (payload_len > 0)
-            print_payload(m, payload_offset, payload_len, max_print);
-        else
-            putchar('\n');
-    } else {
-        printf("proto %u not handled\n", proto);
-    }
-}
-
-static void
-list_ports(void)
-{
-    uint16_t nb_ports = rte_eth_dev_count_avail();
-    printf("Available ports: %u\n", nb_ports);
-    for (uint16_t port = 0; port < nb_ports; port++) {
-        struct rte_eth_dev_info info;
-        char name[RTE_ETH_NAME_MAX_LEN] = {0};
-        if (rte_eth_dev_get_name_by_port(port, name) != 0)
-            snprintf(name, sizeof(name), "port%u", port);
-        rte_eth_dev_info_get(port, &info);
-        printf("  port %u: name=%s driver=%s\n",
-               port, name, info.driver_name ? info.driver_name : "unknown");
-    }
-}
-
-static int
-select_auto_port(uint16_t *out_port)
-{
-    uint16_t nb_ports = rte_eth_dev_count_avail();
-    for (uint16_t port = 0; port < nb_ports; port++) {
-        struct rte_eth_dev_info info;
-        char name[RTE_ETH_NAME_MAX_LEN] = {0};
-        if (rte_eth_dev_get_name_by_port(port, name) != 0)
-            name[0] = '\0';
-        rte_eth_dev_info_get(port, &info);
-
-        if ((info.driver_name && strstr(info.driver_name, "pcap")) ||
-            (name[0] != '\0' && strstr(name, "pcap"))) {
-            *out_port = port;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-void
-dump_first_bytes(struct rte_mbuf *m, uint32_t max_bytes)
-{
-    uint32_t len = rte_pktmbuf_pkt_len(m);
-    uint32_t to_dump = RTE_MIN(len, max_bytes);
-    uint8_t scratch[64];
-    uint32_t dumped = 0;
-
-    printf("pkt_len=%" PRIu32 " first_bytes=", len);
-    while (dumped < to_dump) {
-        uint32_t chunk = RTE_MIN((uint32_t)sizeof(scratch), to_dump - dumped);
-        if (rte_pktmbuf_read(m, dumped, chunk, scratch) == NULL) {
-            printf("[read_error]\n");
-            return;
-        }
-        for (uint32_t i = 0; i < chunk; i++)
-            printf("%02x", scratch[i]);
-        dumped += chunk;
-    }
-    if (len > to_dump)
-        printf("...");
-    putchar('\n');
-}
-
-int
 main(int argc, char **argv)
 {
     struct app_cfg cfg = {
@@ -350,6 +182,8 @@ main(int argc, char **argv)
     rte_atomic64_init(&stats.rx_drop);
     rte_atomic64_init(&stats.worker_in);
     rte_atomic64_init(&stats.worker_out);
+    for (unsigned int i = 0; i < FQDN_COUNT; i++)
+        rte_atomic64_init(&stats.fqdn[i]);
 
     int ret = rte_eal_init(argc, argv);
     if (ret < 0)
@@ -382,24 +216,42 @@ main(int argc, char **argv)
     if (port_init(cfg.port_id, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu16 "\n", cfg.port_id);
 
-    struct rte_ring *ring = rte_ring_create(
-        "rx_to_worker", RX_TO_WORKER_RING_SIZE,
-        rte_socket_id(), RING_F_SC_DEQ);
-    if (ring == NULL)
+    struct rte_ring *cls_ring = rte_ring_create(
+        "rx_to_classifier", RX_TO_CLASSIFIER_RING_SIZE,
+        rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (cls_ring == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create ring: %s\n", rte_strerror(errno));
 
-    struct worker_ctx wctx = {
-        .ring = ring,
+    struct rte_mempool *payload_pool = rte_mempool_create(
+        "payload_pool", PAYLOAD_POOL_SIZE,
+        sizeof(struct payload_item), 0, 0,
+        NULL, NULL, NULL, NULL,
+        rte_socket_id(), 0);
+    if (payload_pool == NULL)
+        rte_exit(EXIT_FAILURE, "Cannot create payload pool: %s\n", rte_strerror(errno));
+
+    struct rx_ctx rx_ctx = {
+        .port_id = cfg.port_id,
+        .cls_ring = cls_ring,
+        .payload_pool = payload_pool,
         .cfg = cfg,
         .stats = &stats,
-        .frag_tbl = NULL,
     };
 
-    unsigned int worker_lcore = 1;
-    if (!rte_lcore_is_enabled(worker_lcore))
-        rte_exit(EXIT_FAILURE, "lcore %u is not enabled; use -l 0-1\n", worker_lcore);
+    struct classifier_ctx cls_ctx = {
+        .ring = cls_ring,
+        .payload_pool = payload_pool,
+        .stats = &stats,
+        .max_print_bytes = cfg.max_print_bytes,
+    };
 
-    rte_eal_remote_launch(worker_main, &wctx, worker_lcore);
+    unsigned int rx_lcore = 1;
+    unsigned int cls_lcore = 2;
+    if (!rte_lcore_is_enabled(rx_lcore) || !rte_lcore_is_enabled(cls_lcore))
+        rte_exit(EXIT_FAILURE, "lcore %u/%u not enabled; use -l 0-2\n", rx_lcore, cls_lcore);
+
+    rte_eal_remote_launch(thread_rx_main, &rx_ctx, rx_lcore);
+    rte_eal_remote_launch(thread_classifier_main, &cls_ctx, cls_lcore);
 
     printf("Reassembly reader started on port %u\n", cfg.port_id);
     printf("frag-timeout-ms=%u, print-max=%u bytes\n", cfg.frag_timeout_ms, cfg.max_print_bytes);
@@ -410,36 +262,26 @@ main(int argc, char **argv)
     uint64_t tsc_hz = rte_get_tsc_hz();
 
     while (!force_quit) {
-        struct rte_mbuf *pkts[BURST_SIZE];
-        uint16_t nb_rx = rte_eth_rx_burst(cfg.port_id, 0, pkts, BURST_SIZE);
-
-        if (nb_rx == 0) {
-            rte_delay_us_sleep(100);
-        } else {
-            rte_atomic64_add(&stats.rx_pkts, nb_rx);
-
-            uint16_t enq = rte_ring_enqueue_burst(ring, (void **)pkts, nb_rx, NULL);
-            if (enq < nb_rx) {
-                uint16_t drop = nb_rx - enq;
-                rte_atomic64_add(&stats.rx_drop, drop);
-                for (uint16_t i = enq; i < nb_rx; i++)
-                    rte_pktmbuf_free(pkts[i]);
-            }
-        }
-
         uint64_t now = rte_get_tsc_cycles();
         if (now - last_tsc >= tsc_hz) {
             uint64_t rx = rte_atomic64_read(&stats.rx_pkts);
             uint64_t drop = rte_atomic64_read(&stats.rx_drop);
             uint64_t win = rte_atomic64_read(&stats.worker_in);
             uint64_t wout = rte_atomic64_read(&stats.worker_out);
-            printf("rx=%" PRIu64 " drop=%" PRIu64 " worker_in=%" PRIu64 " worker_out=%" PRIu64 "\n",
+            printf("rx=%" PRIu64 " drop=%" PRIu64 " worker_in=%" PRIu64 " worker_out=%" PRIu64,
                    rx, drop, win, wout);
+            for (unsigned int i = 0; i < FQDN_COUNT; i++) {
+                printf(" %s=%" PRIu64, fqdn_name((enum fqdn_id)i),
+                       rte_atomic64_read(&stats.fqdn[i]));
+            }
+            putchar('\n');
             last_tsc = now;
         }
+        rte_delay_us_sleep(1000);
     }
 
-    rte_eal_wait_lcore(worker_lcore);
+    rte_eal_wait_lcore(rx_lcore);
+    rte_eal_wait_lcore(cls_lcore);
 
     rte_eth_dev_stop(cfg.port_id);
     rte_eth_dev_close(cfg.port_id);

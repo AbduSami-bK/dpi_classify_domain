@@ -5,11 +5,14 @@
 
 #include <rte_atomic.h>
 
+#include "fqdn_list.h"
+
 struct app_stats {
     rte_atomic64_t rx_pkts;
     rte_atomic64_t rx_drop;
     rte_atomic64_t worker_in;
     rte_atomic64_t worker_out;
+    rte_atomic64_t fqdn[FQDN_COUNT];
 };
 
 struct app_cfg {

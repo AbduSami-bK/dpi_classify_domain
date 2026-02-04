@@ -16,6 +16,7 @@ This program is built using:
 - Boost 1.75 (>= 1.61)
 - Ragel 7.0.0.12
 - RDMA-Core-devel (Lib-ibVerbs) 57.0
+- Hyperscan (optional, for fast FQDN matching)
 
 Make sure your system has these or later versions of these.
 Commands to check versions:
@@ -26,6 +27,7 @@ gcc --version
 cat /etc/os-release
 ldd --version
 dnf list installed kernel boost-devel ragel rdma-core-devel
+dnf list installed hyperscan hyperscan-devel
 ```
 
 Tested with vfio_pci on "82540EM Gigabit Ethernet Controller 100e" by libvirtd (non-iommu mode)

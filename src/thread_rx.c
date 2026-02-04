@@ -8,6 +8,7 @@
 #include <rte_cycles.h>
 #include <rte_debug.h>
 #include <rte_ether.h>
+#include <rte_ethdev.h>
 #include <rte_ip.h>
 #include <rte_ip_frag.h>
 #include <rte_mbuf.h>
@@ -15,40 +16,45 @@
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
-#include "app_common.h"
 #include "app_main.h"
 #include "pkt_helpers.h"
+#include "thread_classifier.h"
 #include "thread_rx.h"
 
+#define FRAG_BUCKETS  1024
+#define FRAG_BUCKET_ENTRIES 16
+#define FRAG_MAX_FLOWS 4096
+
 int
-worker_main(void *arg)
+thread_rx_main(void *arg)
 {
-    struct worker_ctx *ctx = (struct worker_ctx *)arg;
+    struct rx_ctx *ctx = (struct rx_ctx *)arg;
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t frag_cycles = (tsc_hz / 1000) * ctx->cfg.frag_timeout_ms;
 
-    ctx->frag_tbl = rte_ip_frag_table_create(
+    struct rte_ip_frag_tbl *frag_tbl = rte_ip_frag_table_create(
         FRAG_BUCKETS, FRAG_BUCKET_ENTRIES, FRAG_MAX_FLOWS,
         frag_cycles, rte_socket_id());
-    if (ctx->frag_tbl == NULL) {
+    if (frag_tbl == NULL) {
         printf("worker: cannot create frag table: %s\n", strerror(errno));
         return -1;
     }
-    memset(&ctx->death_row, 0, sizeof(ctx->death_row));
+    struct rte_ip_frag_death_row death_row;
+    memset(&death_row, 0, sizeof(death_row));
 
     struct rte_mbuf *pkts[BURST_SIZE];
 
     while (!force_quit) {
-        uint16_t nb = rte_ring_dequeue_burst(ctx->ring, (void **)pkts, BURST_SIZE, NULL);
-        if (nb == 0) {
-            rte_delay_us_sleep(100);
+        uint16_t nb_rx = rte_eth_rx_burst(ctx->port_id, 0, pkts, BURST_SIZE);
+        if (nb_rx == 0) {
+            rte_delay_us_sleep(50);
             continue;
         }
 
-        rte_atomic64_add(&ctx->stats->worker_in, nb);
+        rte_atomic64_add(&ctx->stats->rx_pkts, nb_rx);
 
-        for (uint16_t i = 0; i < nb; i++) {
+        for (uint16_t i = 0; i < nb_rx; i++) {
             struct rte_mbuf *m = pkts[i];
             struct rte_ipv4_hdr *ip_hdr = NULL;
             uint32_t l2_len = 0;
@@ -76,7 +82,7 @@ worker_main(void *arg)
 
             if (rte_ipv4_frag_pkt_is_fragmented(ip_hdr)) {
                 struct rte_mbuf *reassembled = rte_ipv4_frag_reassemble_packet(
-                    ctx->frag_tbl, &ctx->death_row, m, rte_get_tsc_cycles(), ip_hdr);
+                    frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip_hdr);
 
                 if (reassembled == NULL)
                     continue;
@@ -98,25 +104,40 @@ worker_main(void *arg)
                 m->l3_len = ihl_bytes;
             }
 
-            handle_l4_and_print(m, ip_hdr, l2_len, ctx->cfg.max_print_bytes);
-            rte_pktmbuf_free(m);
-            rte_atomic64_inc(&ctx->stats->worker_out);
+            uint32_t payload_offset = 0;
+            uint32_t payload_len = 0;
+            uint8_t proto = 0;
+            if (get_l4_payload_bounds(m, ip_hdr, l2_len, &payload_offset, &payload_len, &proto) == 0) {
+                struct payload_item *item = NULL;
+                if (rte_mempool_get(ctx->payload_pool, (void **)&item) != 0) {
+                    rte_atomic64_inc(&ctx->stats->rx_drop);
+                    rte_pktmbuf_free(m);
+                    continue;
+                }
+
+                item->mbuf = m;
+                item->payload_offset = payload_offset;
+                item->payload_len = payload_len;
+                item->proto = proto;
+
+                if (rte_ring_enqueue(ctx->cls_ring, item) != 0) {
+                    rte_atomic64_inc(&ctx->stats->rx_drop);
+                    rte_mempool_put(ctx->payload_pool, item);
+                    rte_pktmbuf_free(m);
+                    continue;
+                }
+
+                rte_atomic64_inc(&ctx->stats->worker_in);
+            } else {
+                rte_pktmbuf_free(m);
+            }
         }
 
-        rte_ip_frag_free_death_row(&ctx->death_row, BURST_SIZE);
+        rte_ip_frag_free_death_row(&death_row, BURST_SIZE);
     }
 
-    /* Drain any remaining packets on shutdown. */
-    while (rte_ring_dequeue_burst(ctx->ring, (void **)pkts, BURST_SIZE, NULL) > 0) {
-        for (uint16_t i = 0; i < BURST_SIZE; i++) {
-            if (pkts[i] == NULL)
-                break;
-            rte_pktmbuf_free(pkts[i]);
-        }
-    }
-
-    rte_ip_frag_free_death_row(&ctx->death_row, BURST_SIZE);
-    rte_ip_frag_table_destroy(ctx->frag_tbl);
+    rte_ip_frag_free_death_row(&death_row, BURST_SIZE);
+    rte_ip_frag_table_destroy(frag_tbl);
 
     return 0;
 }
