@@ -10,6 +10,7 @@
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_ip.h>
+#include <rte_ip6.h>
 #include <rte_ip_frag.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
@@ -58,8 +59,12 @@ thread_rx_main(void *arg)
             struct rte_mbuf *m = pkts[i];
             struct rte_ipv4_hdr *ip_hdr = NULL;
             uint32_t l2_len = 0;
+            struct rte_ipv6_hdr *ip6_hdr = NULL;
 
-            if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
+            bool is_ipv4 = (get_ipv4_hdr(m, &ip_hdr, &l2_len) == 0);
+            bool is_ipv6 = (!is_ipv4 && get_ipv6_hdr(m, &ip6_hdr, &l2_len) == 0);
+
+            if (!is_ipv4 && !is_ipv6) {
                 if (ctx->cfg.debug_dump_limit > 0) {
                     static uint32_t dumped = 0;
                     if (dumped < ctx->cfg.debug_dump_limit) {
@@ -68,50 +73,93 @@ thread_rx_main(void *arg)
                     }
                 }
                 rte_pktmbuf_free(m);
+                rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
                 continue;
-            }
-
-            uint8_t ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
-            if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
-                rte_pktmbuf_free(m);
-                continue;
-            }
-
-            m->l2_len = (uint16_t)l2_len;
-            m->l3_len = ihl_bytes;
-
-            if (rte_ipv4_frag_pkt_is_fragmented(ip_hdr)) {
-                struct rte_mbuf *reassembled = rte_ipv4_frag_reassemble_packet(
-                    frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip_hdr);
-
-                if (reassembled == NULL)
-                    continue;
-
-                m = reassembled;
-
-                if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
-                    rte_pktmbuf_free(m);
-                    continue;
-                }
-
-                ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
-                if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
-                    rte_pktmbuf_free(m);
-                    continue;
-                }
-
-                m->l2_len = (uint16_t)l2_len;
-                m->l3_len = ihl_bytes;
             }
 
             uint32_t payload_offset = 0;
             uint32_t payload_len = 0;
             uint8_t proto = 0;
-            if (get_l4_payload_bounds(m, ip_hdr, l2_len, &payload_offset, &payload_len, &proto) == 0) {
+
+            if (is_ipv4) {
+                uint8_t ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
+                if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
+                    rte_pktmbuf_free(m);
+                    rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                    continue;
+                }
+
+                m->l2_len = (uint16_t)l2_len;
+                m->l3_len = ihl_bytes;
+
+                if (rte_ipv4_frag_pkt_is_fragmented(ip_hdr)) {
+                    struct rte_mbuf *reassembled = rte_ipv4_frag_reassemble_packet(
+                        frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip_hdr);
+
+                    if (reassembled == NULL)
+                        continue;
+
+                    m = reassembled;
+
+                    if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
+                        rte_pktmbuf_free(m);
+                        rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                        continue;
+                    }
+
+                    ihl_bytes = (uint8_t)((ip_hdr->ihl & 0x0F) * 4);
+                    if (ihl_bytes < sizeof(struct rte_ipv4_hdr)) {
+                        rte_pktmbuf_free(m);
+                        rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                        continue;
+                    }
+
+                    m->l2_len = (uint16_t)l2_len;
+                    m->l3_len = ihl_bytes;
+                }
+
+                if (get_l4_payload_bounds(m, ip_hdr, l2_len, &payload_offset, &payload_len, &proto) != 0) {
+                    rte_pktmbuf_free(m);
+                    rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                    continue;
+                }
+            } else {
+                m->l2_len = (uint16_t)l2_len;
+                m->l3_len = sizeof(struct rte_ipv6_hdr);
+
+                struct rte_ipv6_fragment_ext *frag_hdr = rte_ipv6_frag_get_ipv6_fragment_header(ip6_hdr);
+                if (frag_hdr != NULL) {
+                    struct rte_mbuf *reassembled = rte_ipv6_frag_reassemble_packet(
+                        frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip6_hdr, frag_hdr);
+
+                    if (reassembled == NULL)
+                        continue;
+
+                    m = reassembled;
+
+                    if (get_ipv6_hdr(m, &ip6_hdr, &l2_len) != 0) {
+                        rte_pktmbuf_free(m);
+                        rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                        continue;
+                    }
+
+                    m->l2_len = (uint16_t)l2_len;
+                    m->l3_len = sizeof(struct rte_ipv6_hdr);
+                }
+
+                if (get_ipv6_payload_bounds(m, ip6_hdr, l2_len, &payload_offset, &payload_len, &proto) != 0) {
+                    rte_pktmbuf_free(m);
+                    rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
+                    continue;
+                }
+            }
+
+            if (true) {
                 struct payload_item *item = NULL;
                 if (rte_mempool_get(ctx->payload_pool, (void **)&item) != 0) {
                     rte_atomic64_inc(&ctx->stats->rx_drop);
                     rte_pktmbuf_free(m);
+                    rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
                     continue;
                 }
 
@@ -124,12 +172,11 @@ thread_rx_main(void *arg)
                     rte_atomic64_inc(&ctx->stats->rx_drop);
                     rte_mempool_put(ctx->payload_pool, item);
                     rte_pktmbuf_free(m);
+                    rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
                     continue;
                 }
 
                 rte_atomic64_inc(&ctx->stats->worker_in);
-            } else {
-                rte_pktmbuf_free(m);
             }
         }
 

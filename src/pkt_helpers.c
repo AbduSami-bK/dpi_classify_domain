@@ -6,6 +6,7 @@
 #include <rte_common.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
+#include <rte_ip6.h>
 #include <rte_mbuf.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
@@ -54,6 +55,34 @@ get_ipv4_hdr(struct rte_mbuf *m, struct rte_ipv4_hdr **ip_hdr, uint32_t *l2_len)
         *l2_len = off;
         *ip_hdr = cand;
         return 0;
+    }
+
+    return -1;
+}
+
+int
+get_ipv6_hdr(struct rte_mbuf *m, struct rte_ipv6_hdr **ip_hdr, uint32_t *l2_len)
+{
+    uint8_t *data = rte_pktmbuf_mtod(m, uint8_t *);
+    uint32_t pkt_len = rte_pktmbuf_pkt_len(m);
+
+    if (pkt_len < sizeof(struct rte_ipv6_hdr))
+        return -1;
+
+    if ((data[0] >> 4) == 6) {
+        *l2_len = 0;
+        *ip_hdr = (struct rte_ipv6_hdr *)data;
+        return 0;
+    }
+
+    if (pkt_len >= sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv6_hdr)) {
+        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)data;
+        uint16_t etype = rte_be_to_cpu_16(eth->ether_type);
+        if (etype == RTE_ETHER_TYPE_IPV6) {
+            *l2_len = sizeof(struct rte_ether_hdr);
+            *ip_hdr = (struct rte_ipv6_hdr *)(data + sizeof(struct rte_ether_hdr));
+            return 0;
+        }
     }
 
     return -1;
@@ -140,6 +169,62 @@ get_l4_payload_bounds(struct rte_mbuf *m, struct rte_ipv4_hdr *ip_hdr, uint32_t 
     }
 
     return 1; /* proto not handled */
+}
+
+int
+get_ipv6_payload_bounds(struct rte_mbuf *m, struct rte_ipv6_hdr *ip_hdr, uint32_t l2_len,
+                        uint32_t *payload_offset, uint32_t *payload_len, uint8_t *proto)
+{
+    uint32_t l3_offset = l2_len;
+    uint32_t l4_offset = l3_offset + sizeof(struct rte_ipv6_hdr);
+    uint32_t l4_len = rte_be_to_cpu_16(ip_hdr->payload_len);
+    uint8_t next = ip_hdr->proto;
+
+    if (next == IPPROTO_FRAGMENT) {
+        struct rte_ipv6_fragment_ext frag_hdr;
+        if (rte_pktmbuf_read(m, l4_offset, sizeof(frag_hdr), &frag_hdr) == NULL)
+            return -1;
+        next = frag_hdr.next_header;
+        l4_offset += sizeof(struct rte_ipv6_fragment_ext);
+        if (l4_len < sizeof(struct rte_ipv6_fragment_ext))
+            return -1;
+        l4_len -= sizeof(struct rte_ipv6_fragment_ext);
+    }
+
+    *proto = next;
+
+    if (next == IPPROTO_TCP) {
+        struct rte_tcp_hdr tcp_hdr;
+        if (rte_pktmbuf_read(m, l4_offset, sizeof(tcp_hdr), &tcp_hdr) == NULL)
+            return -1;
+
+        uint8_t tcp_hdr_len = (uint8_t)(((tcp_hdr.data_off & 0xF0) >> 4) * 4);
+        if (tcp_hdr_len < sizeof(struct rte_tcp_hdr) || l4_len < tcp_hdr_len)
+            return -1;
+
+        *payload_offset = l4_offset + tcp_hdr_len;
+        *payload_len = l4_len - tcp_hdr_len;
+        return 0;
+    }
+
+    if (next == IPPROTO_UDP) {
+        struct rte_udp_hdr udp_hdr;
+        if (rte_pktmbuf_read(m, l4_offset, sizeof(udp_hdr), &udp_hdr) == NULL)
+            return -1;
+
+        uint16_t udp_len = rte_be_to_cpu_16(udp_hdr.dgram_len);
+        if (udp_len < sizeof(struct rte_udp_hdr) || l4_len < sizeof(struct rte_udp_hdr))
+            return -1;
+
+        uint32_t ip_payload_len = l4_len - sizeof(struct rte_udp_hdr);
+        uint32_t udp_payload_len = udp_len - sizeof(struct rte_udp_hdr);
+
+        *payload_offset = l4_offset + sizeof(struct rte_udp_hdr);
+        *payload_len = RTE_MIN(ip_payload_len, udp_payload_len);
+        return 0;
+    }
+
+    return 1;
 }
 
 void

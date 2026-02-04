@@ -264,6 +264,19 @@ thread_classifier_main(void *arg)
         }
     }
 
+    /* Drain any remaining payload items safely. */
+    uint16_t nb;
+    do {
+        uint16_t nb = rte_ring_dequeue_burst(ctx->ring, (void **)items, BURST_SIZE, NULL);
+        for (uint16_t i = 0; i < nb; i++) {
+            struct payload_item *item = items[i];
+            if (item == NULL)
+                continue;
+            rte_pktmbuf_free(item->mbuf);
+            rte_mempool_put(ctx->payload_pool, item);
+        }
+    } while (nb > 0);
+
     hs_classifier_free(&classifier);
     return 0;
 }
