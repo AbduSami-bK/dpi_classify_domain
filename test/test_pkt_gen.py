@@ -33,7 +33,10 @@ def record(*domains):
             print(f"Error: {domain} not in stats")
 
 def ipv4(pkt):
-    return fragment(pkt, FRAG_SIZE)
+    # Add Ethernet frame around IP packet
+    eth = Ether(src="00:11:22:33:44:55", dst="aa:bb:cc:dd:ee:ff") / pkt
+    frags = fragment(pkt, FRAG_SIZE)
+    return [Ether(src="00:11:22:33:44:55", dst="aa:bb:cc:dd:ee:ff") / f for f in frags]
 
 def ipv6(pkt):
     raw = bytes(pkt[UDP].payload)
@@ -80,7 +83,8 @@ packets += ipv4(IP(src=SRC_IP4, dst=DST_IP4)/TCP()/Raw(p))
 ### CASE 6: Unfragmented packet with domain
 p = b"A"*10 + b"facebook.com" + b"B"*50
 record("FB")
-packets.append(IP(src=SRC_IP4, dst=DST_IP4)/UDP()/Raw(p))
+pkt = Ether(src="00:11:22:33:44:55", dst="aa:bb:cc:dd:ee:ff") / IP(src=SRC_IP4, dst=DST_IP4)/UDP()/Raw(p)
+packets.append(pkt)
 
 ### CASE 7: Upper-case domain (don’t count)
 p = b"A"*20 + b"GOOGLE.COM" + b"B"*200

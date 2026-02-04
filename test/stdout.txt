@@ -1,0 +1,10 @@
+simple_reader: started — reading from port 0
+... read 4 packets so far
+etype=0026 (not ipv4)
+pkt: not ipv4
+etype=0026 (not ipv4)
+pkt: not ipv4
+etype=0026 (not ipv4)
+pkt: not ipv4
+etype=0026 (not ipv4)
+pkt: not ipv4

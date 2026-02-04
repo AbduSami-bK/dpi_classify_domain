@@ -72,12 +72,17 @@ int main(int argc, char **argv) {
     }
 
     uint16_t portid = 0;
-    if (port_init(portid, mp) != 0) {
+    printf("Attempting to init port %u...\n", portid);
+    int init_ret = port_init(portid, mp);
+    printf("port_init returned %d\n", init_ret);
+    if (init_ret != 0) {
         fprintf(stderr, "Failed to init port %u\n", portid);
         return 1;
     }
 
     printf("simple_reader: started — reading from port %u\n", portid);
+
+    uint64_t total_pkts = 0;
 
     while (!force_quit) {
         struct rte_mbuf *pkts[BURST_SIZE];
@@ -87,10 +92,19 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        total_pkts += nb_rx;
+        printf("... read %lu packets so far\n", total_pkts);
+
         for (uint16_t i = 0; i < nb_rx; ++i) {
             struct rte_mbuf *m = pkts[i];
             unsigned char *data = rte_pktmbuf_mtod(m, unsigned char *);
             uint32_t tot_len = rte_pktmbuf_pkt_len(m);
+
+            /* DEBUG: Print first 14 bytes as hex */
+            printf("Pkt %u: len=%u hex: ", i, tot_len);
+            for (int x = 0; x < (tot_len < 14 ? tot_len : 14); ++x)
+                printf("%02x ", data[x]);
+            printf("\n");
 
             /* detect IPv4 (raw) or Ethernet+IPv4 */
             unsigned char *ipstart = NULL;
@@ -100,6 +114,7 @@ int main(int argc, char **argv) {
                 struct rte_ether_hdr *eth = (struct rte_ether_hdr *)data;
                 uint16_t etype = rte_be_to_cpu_16(eth->ether_type);
                 if (etype == RTE_ETHER_TYPE_IPV4) ipstart = data + sizeof(struct rte_ether_hdr);
+                else printf("etype=%04x (not ipv4)\n", etype);
             }
 
             if (!ipstart) {
