@@ -1,6 +1,0 @@
-EAL: Detected CPU lcores: 8
-EAL: Detected NUMA nodes: 1
-EAL: Detected shared linkage of DPDK
-EAL: Multi-process socket /var/run/dpdk/rte/mp_socket
-EAL: Selected IOVA mode 'PA'
-EAL: VFIO support initialized

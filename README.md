@@ -1,96 +1,82 @@
 # Mini-DPI
 
-This is a mini DPI project, done as a hiring task for a firm.
-The program reads IP packets and counts the packets related to four hard-coded websites.
+A minimal DPDK-based DPI pipeline that reassembles IPv4/IPv6 packets, extracts TCP/UDP payloads,
+and classifies them by FQDN using Hyperscan (or memmem fallback).
 
-## Pre-requisites
+## Features
 
-This program is built using:
+- DPDK RX + multi-core pipeline
+- IPv4 + IPv6 reassembly (ip_frag)
+- TCP/UDP payload scanning (first 256 bytes)
+- Hyperscan support (system package preferred)
+- Optional payload printing
+- Performance stats (pps, gbps, avg latency)
 
-- DPDK  25.11.
-- CMake 3.26.5
-- GCC   11.5.0
-- OS    Rocky Linux 9.7
-- Linux Kernel  5.14.0-611
-- libc  2.34
-- Boost 1.75 (>= 1.61)
-- Ragel 7.0.0.12
-- RDMA-Core-devel (Lib-ibVerbs) 57.0
-
-Make sure your system has these or later versions of these.
-Commands to check versions:
+## Build
 
 ```bash
-cmake --version
-gcc --version
-cat /etc/os-release
-ldd --version
-dnf list installed kernel boost-devel ragel rdma-core-devel
+mkdir -p build
+cd build
+cmake -G Ninja -DUSE_HYPERSCAN=ON -DUSE_SYSTEM_HYPERSCAN=ON ..
+ninja
 ```
 
-Tested with vfio_pci on "82540EM Gigabit Ethernet Controller 100e" by libvirtd (non-iommu mode)
+If Hyperscan is not available:
 
-## How to build
+```bash
+cmake -G Ninja -DUSE_HYPERSCAN=OFF ..
+```
 
-[TODO] _exact build commands_
+## Run
 
-1. Make sure all the listed pre-requisites are installed in you system. The listed version or later.
-2. Setup DPDK
-    1. Hugepages
-    2. [Optional] Isolate CPUs for performance
-        1. Reboot
-    3. Bind interfaces.
-3. `mkdir build`
-5. `cd build`
-4. `cmake -G Ninja ..`
-6. `ninja`
+### Pcap PMD
 
-## How to run
+```bash
+./build/mini_dpi --cfg-file /root/dpi_classify_domain/config/mini_dpi.cfg
+```
 
-- `./build/build/dpi_classify_domain -l 0 -a 00:09.0`
-- `./build/build/dpi_classify_domain -l 0 --vdev net_af_packet0,iface=ens9`
-- Ctrl+C to close.
+### AF_PACKET
 
-## [Delete] Project plan
+```bash
+./build/mini_dpi -l 0-2 \
+  --vdev 'net_af_packet0,iface=eth0' \
+  -- --cfg-file /root/dpi_classify_domain/config/mini_dpi.cfg --port 0 --ring-size 4096 --frag-timeout-ms 30000
+```
 
-1. Get DPDK sample app to ingest packets from pcap
-2. Save global rx stats
-3. Write unit tests for stats
-4. Write a Cmake file to compile and test
-5. Update README with build and run commands.
-6. Write a Changelog.md
-7. Merge v0.1 to master
-8. Ingest packets from port
-9. Exit on signals
-10. Create a sample pcap with FQDN packets
-11. Parse IP layer
-12. Merge v0.2 to master
-13. Detect fragmentation
-14. ReAssemble
-15. fragmentation stats
-16. Unit tests
-17. Merge v0.3 to master
-18. Out of order fragments
-19. ReAssembly timeout
-20. Unit tests
-21. Merge v0.4 to master
-22. Parse TCP & UDP upto first 256 byte payloads
-23. Unit tests
-24. Merge v0.5 to master
-25. Configure Hyperscan
-26. Hard-coded FQDN counters.
-27. Unit tests
-28. Merge v0.6 to master
-29. Performance test
-30. Write implementation notes
-31. Merge v0.7 to master
-32. Correct lifecycles
-33. Get reviewed by AI
-34. Performance optimizations
-35. Merge v0.8 to master
-36. Move hard-coded FQDNs to config file
-37. Unit tests
-38. Merge v0.9 to master
-39. Let program take config file path as cmd input
-40. Unit tests
-41. Merge v1 to master
+## App Args
+
+- `--port N` DPDK port
+- `--auto-port` select pcap vdev automatically
+- `--list-ports` list available ports
+- `--ring-size N` ring size between RX and classifier
+- `--frag-timeout-ms N` reassembly timeout
+- `--print-payloads` print TCP/UDP payloads
+- `--print-max N` limit payload print bytes
+- `--perf` print pps/gbps/avg latency
+- `--log-file PATH` write errors to a log file (default: stderr)
+- `--debug-dump N` dump first N non-IPv4/IPv6 packets (debug)
+- `--cfg-file PATH` load configuration file (CLI overrides config)
+- `--log-level LEVEL` set log level (emerg|alert|crit|err|warning|notice|info|debug)
+
+When `--perf` is enabled, the app exits after ~1,000,000 classified packets and prints a final summary.
+
+## DPDK Setup Notes
+
+- Allocate hugepages and mount hugetlbfs (required for most DPDK PMDs).
+- Bind NICs to DPDK-compatible drivers where needed.
+- Ensure your user has permission to access hugepages and NICs.
+
+## Notes
+
+- Use `-l 0-2` to enable main + RX + classifier cores.
+- Hyperscan uses system packages when available.
+
+## Dependencies
+
+- DPDK (>= 22.11)
+- GCC, CMake, Ninja
+- Hyperscan (optional)
+
+## Licenses
+
+See `LICENSE` and `NOTICE.md`.

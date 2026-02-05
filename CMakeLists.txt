@@ -41,10 +41,31 @@ file(MAKE_DIRECTORY ${OUTPUT_DIR})
 # Find pkg-config
 find_package(PkgConfig REQUIRED)
 
-# --------------------------------
-# HyperScan
-# --------------------------------
 ## Help from https://cliutils.gitlab.io/modern-cmake/chapters/projects/submodule.html
+option(USE_HYPERSCAN "Build with Hyperscan" ON)
+option(USE_SYSTEM_HYPERSCAN "Prefer system-installed Hyperscan" ON)
+include(CheckIncludeFile)
+check_include_file("x86intrin.h" HAS_X86INTRIN)
+check_include_file("unistd.h" HAS_UNISTD)
+if(USE_HYPERSCAN AND (NOT HAS_X86INTRIN OR NOT HAS_UNISTD))
+	message(WARNING "Missing intrinsics headers (x86intrin.h/unistd.h). Disabling Hyperscan.")
+	set(USE_HYPERSCAN OFF)
+endif()
+
+# Hyperscan's CMake checks can fail to find x86intrin.h even when GCC knows it.
+# Inject GCC's include path explicitly for the subproject checks.
+if(USE_HYPERSCAN)
+	execute_process(
+		COMMAND ${CMAKE_C_COMPILER} -print-file-name=include
+		OUTPUT_VARIABLE GCC_INCLUDE_DIR
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+	)
+	if(EXISTS "${GCC_INCLUDE_DIR}/x86intrin.h")
+		message(STATUS "Using GCC include dir for Hyperscan: ${GCC_INCLUDE_DIR}")
+		set(CMAKE_REQUIRED_INCLUDES "${GCC_INCLUDE_DIR}")
+		add_compile_options("-isystem" "${GCC_INCLUDE_DIR}")
+	endif()
+endif()
 find_package(Git QUIET)
 
 # if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
@@ -68,18 +89,29 @@ find_package(Git QUIET)
 # 	endif()
 # endif()
 
-# if(NOT EXISTS "${PROJECT_SOURCE_DIR}/hyperscan/CMakeLists.txt")
-# 	message(FATAL_ERROR "The submodules were not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
-# endif()
+if(USE_HYPERSCAN AND USE_SYSTEM_HYPERSCAN)
+	pkg_check_modules(HYPERSCAN QUIET libhs)
+	if(HYPERSCAN_FOUND)
+		message(STATUS "Using system Hyperscan via pkg-config")
+	endif()
+endif()
 
-# add_subdirectory(hyperscan)
-# if(TARGET hs)
-# 	set(HYPERSCAN_TARGET hs)
-# elseif(TARGET hs_shared)
-# 	set(HYPERSCAN_TARGET hs_shared)
-# elseif(TARGET hs_static)
-# 	set(HYPERSCAN_TARGET hs_static)
-# endif()
+set(HYPERSCAN_SUBMODULE_USED OFF)
+if(USE_HYPERSCAN AND NOT HYPERSCAN_FOUND)
+	if(NOT EXISTS "${PROJECT_SOURCE_DIR}/hyperscan/CMakeLists.txt")
+		message(FATAL_ERROR "Hyperscan submodule is missing. Please init submodules or disable USE_HYPERSCAN.")
+	endif()
+
+	add_subdirectory(hyperscan)
+	if(TARGET hs)
+		set(HYPERSCAN_TARGET hs)
+	elseif(TARGET hs_shared)
+		set(HYPERSCAN_TARGET hs_shared)
+	elseif(TARGET hs_static)
+		set(HYPERSCAN_TARGET hs_static)
+	endif()
+	set(HYPERSCAN_SUBMODULE_USED ON)
+endif()
 
 # --------------------------------
 # DPDK
@@ -95,7 +127,12 @@ endif()
 # endif()
 
 # SET(APP "mini_dpi")
-set(SRCS-y "src/main.c")
+set(SRCS-y
+	"src/mini_dpi.c"
+	"src/thread_rx.c"
+	"src/thread_classifier.c"
+	"src/pkt_helpers.c"
+)
 
 # Function to create executable with specific linking
 function(add_dpdk_executable link_static)
@@ -114,22 +151,33 @@ function(add_dpdk_executable link_static)
 	target_include_directories(${target_name}
 		PRIVATE
 
-		# ${CMAKE_SOURCE_DIR}/include
+		${CMAKE_SOURCE_DIR}/include
 		# ${CMAKE_BINARY_DIR}/generated
 		${DPDK_INCLUDE_DIRS}
 
-		# ${CMAKE_SOURCE_DIR}/hyperscan/include
 	)
 
 	if(link_static)
 		target_link_libraries(${target_name} PRIVATE ${DPDK_STATIC_LIBRARIES})
 		message(STATUS "Linking ${target_name} statically with DPDK")
 	else()
-		target_link_libraries(${target_name} PRIVATE PkgConfig::DPDK)
-		message(STATUS "Linking ${target_name} dynamically with DPDK")
-	endif()
+	target_link_libraries(${target_name} PRIVATE PkgConfig::DPDK)
+	message(STATUS "Linking ${target_name} dynamically with DPDK")
+endif()
 
-	# target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_TARGET})
+	if(USE_HYPERSCAN)
+		if(HYPERSCAN_FOUND)
+			target_include_directories(${target_name} PRIVATE ${HYPERSCAN_INCLUDE_DIRS})
+			target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_LIBRARIES})
+			target_compile_definitions(${target_name} PRIVATE USE_HYPERSCAN)
+		elseif(HYPERSCAN_TARGET)
+			target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/hyperscan/include)
+			target_link_libraries(${target_name} PRIVATE ${HYPERSCAN_TARGET})
+			target_compile_definitions(${target_name} PRIVATE USE_HYPERSCAN)
+		else()
+			message(WARNING "Hyperscan not found; falling back to memmem()")
+		endif()
+	endif()
 	target_compile_definitions(${target_name} PRIVATE ALLOW_EXPERIMENTAL_API)
 
 	# Set output directory
