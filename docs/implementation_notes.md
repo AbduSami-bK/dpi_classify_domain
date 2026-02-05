@@ -39,3 +39,5 @@ Thread_print: Print stats periodically. -> Merged with main thread.
 | 6. | Chatbot | Gemini 3 | main.c | Discussed about using macros and enum lists for multiple usage types. Learned about the `##` preprocessor string concat and how to use it for this use case. |
 | 7. | Chatbot | Gemini 3 | main.c | Summarize compiler output warnings |
 | 8. | Chatbot & GitHub Copilot in VSCode | GitHub Co-pilot and DeepSeek | Gave up on doing it completely manually with 1 hour remaining in the deadline and tried to get Co-pilot to help me read payload form the packets |
+
+See `BRANCHES.md` for other branches containing earlier or more complete versions.
