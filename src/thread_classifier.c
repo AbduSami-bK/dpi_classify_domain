@@ -8,6 +8,7 @@
 #include <rte_atomic.h>
 #include <rte_common.h>
 #include <rte_ip.h>
+#include <rte_log.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 
@@ -78,7 +79,7 @@ hs_classifier_init(struct hs_classifier *cls)
                                HS_MODE_VECTORED, NULL, &cls->db, &compile_err);
     if (err != HS_SUCCESS) {
         if (compile_err) {
-            printf("Hyperscan compile failed: %s\n", compile_err->message);
+            RTE_LOG(ERR, MINI_DPI, "hyperscan compile failed: %s\n", compile_err->message);
             hs_free_compile_error(compile_err);
         }
         return -1;
@@ -86,7 +87,7 @@ hs_classifier_init(struct hs_classifier *cls)
 
     err = hs_alloc_scratch(cls->db, &cls->scratch);
     if (err != HS_SUCCESS) {
-        printf("Hyperscan scratch allocation failed\n");
+        RTE_LOG(ERR, MINI_DPI, "hyperscan scratch allocation failed\n");
         hs_free_database(cls->db);
         cls->db = NULL;
         return -1;
@@ -222,7 +223,7 @@ thread_classifier_main(void *arg)
     struct hs_classifier classifier = {0};
 
     if (hs_classifier_init(&classifier) != 0) {
-        printf("classifier: hyperscan init failed (falling back to memmem if disabled)\n");
+        RTE_LOG(WARNING, MINI_DPI, "classifier: hyperscan init failed (falling back to memmem if disabled)\n");
     }
 
     struct payload_item *items[BURST_SIZE];

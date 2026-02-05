@@ -7,10 +7,12 @@
 #include <rte_ether.h>
 #include <rte_ip.h>
 #include <rte_ip6.h>
+#include <rte_log.h>
 #include <rte_mbuf.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
+#include "app_common.h"
 #include "pkt_helpers.h"
 
 int
@@ -101,7 +103,7 @@ print_payload_range(struct rte_mbuf *m, uint32_t offset, uint32_t len, uint32_t 
     while (printed < to_print) {
         uint32_t chunk = RTE_MIN((uint32_t)sizeof(scratch), to_print - printed);
         if (rte_pktmbuf_read(m, offset + printed, chunk, scratch) == NULL) {
-            printf("[payload read error]\n");
+            RTE_LOG(WARNING, MINI_DPI, "payload read error\n");
             return;
         }
 
@@ -237,9 +239,9 @@ handle_l4_and_print(struct rte_mbuf *m, struct rte_ipv4_hdr *ip_hdr, uint32_t l2
     int ret = get_l4_payload_bounds(m, ip_hdr, l2_len, &payload_offset, &payload_len, &proto);
     if (ret != 0) {
         if (ret == 1)
-            printf("proto %u not handled\n", proto);
+            RTE_LOG(WARNING, MINI_DPI, "proto %u not handled\n", proto);
         else
-            printf("L4 header invalid\n");
+            RTE_LOG(WARNING, MINI_DPI, "L4 header invalid\n");
         return;
     }
 

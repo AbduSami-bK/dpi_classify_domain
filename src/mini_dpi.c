@@ -1,4 +1,5 @@
 // Mini DPI main: RX on lcore 0, worker on lcore 1
+#define _GNU_SOURCE
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -8,15 +9,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 
 #include <rte_atomic.h>
+#include <rte_cfgfile.h>
 #include <rte_common.h>
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
+#include <rte_log.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
@@ -34,6 +38,10 @@
 #define DEFAULT_MAX_PRINT 1024
 #define DEFAULT_RING_SIZE 4096
 #define PAYLOAD_POOL_SIZE 8192
+#define PERF_TARGET_PKTS 1000000
+
+#define CFG_SECTION_EAL "eal"
+#define CFG_SECTION_APP "app"
 
 volatile bool force_quit = false;
 
@@ -48,13 +56,24 @@ signal_handler(int signum)
 static void
 print_usage(const char *prog)
 {
-    printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--ring-size N] [--frag-timeout-ms N] [--print-max N] [--print-payloads] [--perf] [--debug-dump N]\n", prog);
+    printf("Usage: %s [EAL args] -- [--cfg-file PATH] [--port N] [--auto-port] [--list-ports] [--ring-size N] [--frag-timeout-ms N] [--print-max N] [--print-payloads] [--perf] [--log-file PATH] [--debug-dump N]\n", prog);
+}
+
+static bool
+argv_has_flag(int argc, char **argv, const char *flag)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], flag) == 0)
+            return true;
+    }
+    return false;
 }
 
 static int
 parse_app_args(int argc, char **argv, struct app_cfg *cfg)
 {
     static struct option long_opts[] = {
+        {"cfg-file", required_argument, NULL, 'c'},
         {"port", required_argument, NULL, 'p'},
         {"auto-port", no_argument, NULL, 'a'},
         {"list-ports", no_argument, NULL, 'l'},
@@ -63,6 +82,8 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
         {"print-max", required_argument, NULL, 'm'},
         {"print-payloads", no_argument, NULL, 'P'},
         {"perf", no_argument, NULL, 'f'},
+        {"log-file", required_argument, NULL, 'L'},
+        {"log-level", required_argument, NULL, 'v'},
         {"debug-dump", required_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0}
@@ -74,6 +95,9 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
     optind = 1;
     while ((opt = getopt_long(argc, argv, "", long_opts, &opt_idx)) != -1) {
         switch (opt) {
+        case 'c':
+            cfg->cfg_file = optarg;
+            break;
         case 'p':
             cfg->port_id = (uint16_t)atoi(optarg);
             break;
@@ -98,6 +122,12 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
         case 'f':
             cfg->perf = true;
             break;
+        case 'L':
+            cfg->log_file = optarg;
+            break;
+        case 'v':
+            cfg->log_level = optarg;
+            break;
         case 'd':
             cfg->debug_dump_limit = (uint32_t)atoi(optarg);
             break;
@@ -109,6 +139,144 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
     }
 
     return 0;
+}
+
+static const char *
+find_cfg_file(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--cfg-file") == 0 || strcmp(argv[i], "-c") == 0) {
+            if (i + 1 < argc)
+                return argv[i + 1];
+        }
+    }
+    return NULL;
+}
+
+static int
+cfg_get_u32(struct rte_cfgfile *cfg, const char *section, const char *name, uint32_t *out)
+{
+    const char *val = rte_cfgfile_get_entry(cfg, section, name);
+    if (!val || !out)
+        return -1;
+    *out = (uint32_t)atoi(val);
+    return 0;
+}
+
+static int
+cfg_get_bool(struct rte_cfgfile *cfg, const char *section, const char *name, bool *out)
+{
+    const char *val = rte_cfgfile_get_entry(cfg, section, name);
+    if (!val || !out)
+        return -1;
+    if (!strcasecmp(val, "1") || !strcasecmp(val, "true") || !strcasecmp(val, "yes") || !strcasecmp(val, "on")) {
+        *out = true;
+        return 0;
+    }
+    if (!strcasecmp(val, "0") || !strcasecmp(val, "false") || !strcasecmp(val, "no") || !strcasecmp(val, "off")) {
+        *out = false;
+        return 0;
+    }
+    return -1;
+}
+
+static void
+cfg_apply_app(struct rte_cfgfile *cfg, struct app_cfg *app)
+{
+    const char *log_file = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "log_file");
+    const char *log_level = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "log_level");
+    const char *cfg_port = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "port");
+    const char *print_payloads = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "print_payloads");
+    const char *auto_port = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "auto_port");
+    const char *list_ports = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "list_ports");
+    const char *perf = rte_cfgfile_get_entry(cfg, CFG_SECTION_APP, "perf");
+
+    if (log_file)
+        app->log_file = log_file;
+    if (log_level)
+        app->log_level = log_level;
+    if (cfg_port)
+        app->port_id = (uint16_t)atoi(cfg_port);
+
+    cfg_get_u32(cfg, CFG_SECTION_APP, "ring_size", &app->ring_size);
+    cfg_get_u32(cfg, CFG_SECTION_APP, "frag_timeout_ms", &app->frag_timeout_ms);
+    cfg_get_u32(cfg, CFG_SECTION_APP, "print_max", &app->max_print_bytes);
+    cfg_get_u32(cfg, CFG_SECTION_APP, "debug_dump_limit", &app->debug_dump_limit);
+
+    if (print_payloads)
+        cfg_get_bool(cfg, CFG_SECTION_APP, "print_payloads", &app->print_payloads);
+    if (auto_port)
+        cfg_get_bool(cfg, CFG_SECTION_APP, "auto_port", &app->auto_port);
+    if (list_ports)
+        cfg_get_bool(cfg, CFG_SECTION_APP, "list_ports", &app->list_ports);
+    if (perf)
+        cfg_get_bool(cfg, CFG_SECTION_APP, "perf", &app->perf);
+}
+
+static int
+cfg_build_eal_argv(struct rte_cfgfile *cfg, int *out_argc, char ***out_argv)
+{
+    const char *args = rte_cfgfile_get_entry(cfg, CFG_SECTION_EAL, "args");
+    if (!args || !out_argc || !out_argv)
+        return -1;
+
+    char *dup = strdup(args);
+    if (!dup)
+        return -1;
+
+    int cap = 16;
+    int count = 0;
+    char **vec = calloc(cap, sizeof(char *));
+    if (!vec) {
+        free(dup);
+        return -1;
+    }
+
+    char *save = NULL;
+    char *tok = strtok_r(dup, " \t", &save);
+    while (tok) {
+        if (count == cap) {
+            cap *= 2;
+            char **n = realloc(vec, cap * sizeof(char *));
+            if (!n) {
+                free(vec);
+                free(dup);
+                return -1;
+            }
+            vec = n;
+        }
+        vec[count++] = tok;
+        tok = strtok_r(NULL, " \t", &save);
+    }
+
+    *out_argc = count;
+    *out_argv = vec;
+    return 0;
+}
+
+static void
+cfg_free_eal_argv(char **argv)
+{
+    if (!argv)
+        return;
+    free(argv[0]);
+    free(argv);
+}
+
+static int
+log_level_from_str(const char *s)
+{
+    if (!s)
+        return -1;
+    if (!strcasecmp(s, "emerg")) return RTE_LOG_EMERG;
+    if (!strcasecmp(s, "alert")) return RTE_LOG_ALERT;
+    if (!strcasecmp(s, "crit")) return RTE_LOG_CRIT;
+    if (!strcasecmp(s, "err")) return RTE_LOG_ERR;
+    if (!strcasecmp(s, "warning") || !strcasecmp(s, "warn")) return RTE_LOG_WARNING;
+    if (!strcasecmp(s, "notice")) return RTE_LOG_NOTICE;
+    if (!strcasecmp(s, "info")) return RTE_LOG_INFO;
+    if (!strcasecmp(s, "debug")) return RTE_LOG_DEBUG;
+    return -1;
 }
 
 static void
@@ -190,6 +358,9 @@ main(int argc, char **argv)
         .list_ports = false,
         .print_payloads = false,
         .perf = false,
+        .log_file = NULL,
+        .cfg_file = NULL,
+        .log_level = NULL,
     };
 
     struct app_stats stats;
@@ -207,19 +378,89 @@ main(int argc, char **argv)
     for (unsigned int i = 0; i < FQDN_COUNT; i++)
         rte_atomic64_init(&stats.fqdn[i]);
 
-    int ret = rte_eal_init(argc, argv);
+    if (argv_has_flag(argc, argv, "--app-help")) {
+        print_usage(argv[0]);
+        return 0;
+    }
+
+    if (argv_has_flag(argc, argv, "--help")) {
+        fprintf(stderr, "NOTE: --help shows EAL options. Use --app-help for app options.\n");
+    }
+
+    const char *cfg_file = find_cfg_file(argc, argv);
+    if (cfg_file)
+        cfg.cfg_file = cfg_file;
+
+    int cfg_eal_argc = 0;
+    char **cfg_eal_argv = NULL;
+    struct rte_cfgfile *cfgf = NULL;
+
+    if (cfg_file) {
+        cfgf = rte_cfgfile_load(cfg_file, 0);
+        if (!cfgf) {
+            fprintf(stderr, "WARN: cannot read cfg file '%s'\n", cfg_file);
+        } else {
+            cfg_apply_app(cfgf, &cfg);
+            cfg_build_eal_argv(cfgf, &cfg_eal_argc, &cfg_eal_argv);
+        }
+    }
+
+    int merged_argc = argc + cfg_eal_argc;
+    char **merged_argv = calloc((size_t)merged_argc + 1, sizeof(char *));
+    if (!merged_argv)
+        rte_exit(EXIT_FAILURE, "Cannot allocate argv\n");
+
+    int m = 0;
+    merged_argv[m++] = argv[0];
+    for (int i = 0; i < cfg_eal_argc; i++)
+        merged_argv[m++] = cfg_eal_argv[i];
+
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "--cfg-file") == 0 || strcmp(argv[i], "-c") == 0) && (i + 1 < argc)) {
+            i++;
+            continue;
+        }
+        merged_argv[m++] = argv[i];
+    }
+    merged_argv[m] = NULL;
+
+    int ret = rte_eal_init(m, merged_argv);
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "EAL init failed\n");
 
+    argc = m;
+    argv = merged_argv;
     argc -= ret;
     argv += ret;
 
     if (parse_app_args(argc, argv, &cfg) != 0)
         rte_exit(EXIT_FAILURE, "Invalid arguments\n");
 
+    if (cfg.log_file && cfg.log_file[0] != '\0') {
+        FILE *lf = fopen(cfg.log_file, "a");
+        if (lf) {
+            rte_openlog_stream(lf);
+        } else {
+            fprintf(stderr, "WARN: failed to open log file, using stderr\n");
+        }
+    }
+    if (cfg.log_level) {
+        int lvl = log_level_from_str(cfg.log_level);
+        if (lvl >= 0) {
+            rte_log_set_level(RTE_LOGTYPE_MINI_DPI, lvl);
+        } else {
+            fprintf(stderr, "WARN: invalid log level '%s'\n", cfg.log_level);
+        }
+    }
+
     list_ports();
-    if (cfg.list_ports)
+    if (cfg.list_ports) {
+        if (cfgf)
+            rte_cfgfile_close(cfgf);
+        cfg_free_eal_argv(cfg_eal_argv);
+        free(merged_argv);
         return 0;
+    }
 
     if (cfg.auto_port) {
         if (select_auto_port(&cfg.port_id) != 0)
@@ -336,7 +577,42 @@ main(int argc, char **argv)
             putchar('\n');
             last_tsc = now;
         }
+        if (cfg.perf) {
+            uint64_t wout = rte_atomic64_read(&stats.worker_out);
+            if (wout >= PERF_TARGET_PKTS)
+                force_quit = true;
+        }
         rte_delay_us_sleep(1000);
+    }
+
+    /* Final summary */
+    {
+        uint64_t rx = rte_atomic64_read(&stats.rx_pkts);
+        uint64_t drop = rte_atomic64_read(&stats.rx_drop);
+        uint64_t win = rte_atomic64_read(&stats.worker_in);
+        uint64_t wout = rte_atomic64_read(&stats.worker_out);
+        uint64_t frags = rte_atomic64_read(&stats.fragments_seen);
+        uint64_t reasmb = rte_atomic64_read(&stats.packets_reassembled);
+        uint64_t fdrop = rte_atomic64_read(&stats.frag_drops);
+        uint64_t fto = rte_atomic64_read(&stats.frag_timeouts);
+        printf("final rx=%" PRIu64 " drop=%" PRIu64 " worker_in=%" PRIu64 " worker_out=%" PRIu64,
+               rx, drop, win, wout);
+        printf(" frags=%" PRIu64 " reasmb=%" PRIu64 " frag_drop=%" PRIu64 " frag_timeout=%" PRIu64,
+               frags, reasmb, fdrop, fto);
+        for (unsigned int i = 0; i < FQDN_COUNT; i++) {
+            uint64_t v = __atomic_load_n(&stats.fqdn[i].cnt, __ATOMIC_RELAXED);
+            printf(" %s=%" PRIu64, fqdn_name((enum fqdn_id)i), v);
+        }
+        if (cfg.perf) {
+            uint64_t bytes = rte_atomic64_read(&stats.rx_bytes);
+            uint64_t lat_sum = rte_atomic64_read(&stats.latency_sum_cycles);
+            uint64_t lat_cnt = rte_atomic64_read(&stats.latency_samples);
+            double avg_us = 0.0;
+            if (lat_cnt > 0)
+                avg_us = ((double)lat_sum / (double)lat_cnt) * 1e6 / (double)tsc_hz;
+            printf(" total_bytes=%" PRIu64 " avg_lat_us=%.2f", bytes, avg_us);
+        }
+        putchar('\n');
     }
 
     rte_eal_wait_lcore(rx_lcore);
@@ -345,6 +621,11 @@ main(int argc, char **argv)
     rte_eth_dev_stop(cfg.port_id);
     rte_eth_dev_close(cfg.port_id);
     rte_eal_cleanup();
+
+    if (cfgf)
+        rte_cfgfile_close(cfgf);
+    cfg_free_eal_argv(cfg_eal_argv);
+    free(merged_argv);
 
     return 0;
 }

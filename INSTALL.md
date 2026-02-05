@@ -38,9 +38,7 @@ cmake -G Ninja -DUSE_HYPERSCAN=OFF ..
 ### Pcap PMD
 
 ```bash
-./build/mini_dpi -l 0-2 \
-  --vdev 'net_pcap0,rx_pcap=/root/dpi_classify_domain/test/test.pcap' \
-  -- --port 1 --ring-size 4096 --frag-timeout-ms 30000
+./build/mini_dpi --cfg-file /root/dpi_classify_domain/config/mini_dpi.cfg
 ```
 
 ### AF_PACKET
@@ -48,7 +46,7 @@ cmake -G Ninja -DUSE_HYPERSCAN=OFF ..
 ```bash
 ./build/mini_dpi -l 0-2 \
   --vdev 'net_af_packet0,iface=eth0' \
-  -- --port 0 --ring-size 4096 --frag-timeout-ms 30000
+  -- --cfg-file /root/dpi_classify_domain/config/mini_dpi.cfg --port 0 --ring-size 4096 --frag-timeout-ms 30000
 ```
 
 ### Optional flags
@@ -56,3 +54,10 @@ cmake -G Ninja -DUSE_HYPERSCAN=OFF ..
 - `--print-payloads` prints TCP/UDP payloads to stdout
 - `--print-max N` limits bytes printed per packet
 - `--perf` prints pps/gbps/avg latency in the stats line
+- `--log-file PATH` writes error logs to a file (default: stderr)
+- `--cfg-file PATH` load configuration file (CLI overrides config)
+- `--log-level LEVEL` set log level (emerg|alert|crit|err|warning|notice|info|debug)
+
+## Config File
+
+Edit `config/mini_dpi.cfg` before running. It supports both EAL args and app args.

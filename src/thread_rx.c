@@ -12,6 +12,7 @@
 #include <rte_ip.h>
 #include <rte_ip6.h>
 #include <rte_ip_frag.h>
+#include <rte_log.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <rte_tcp.h>
@@ -38,7 +39,7 @@ thread_rx_main(void *arg)
         FRAG_BUCKETS, FRAG_BUCKET_ENTRIES, FRAG_MAX_FLOWS,
         frag_cycles, rte_socket_id());
     if (frag_tbl == NULL) {
-        printf("worker: cannot create frag table: %s\n", strerror(errno));
+        RTE_LOG(ERR, MINI_DPI, "rx: cannot create frag table: %s\n", strerror(errno));
         return -1;
     }
     struct rte_ip_frag_death_row death_row;
@@ -178,6 +179,11 @@ thread_rx_main(void *arg)
             if (true) {
                 struct payload_item *item = NULL;
                 if (rte_mempool_get(ctx->payload_pool, (void **)&item) != 0) {
+                    static bool warned_pool = false;
+                    if (!warned_pool) {
+                        RTE_LOG(ERR, MINI_DPI, "rx: payload pool exhausted, dropping packet\n");
+                        warned_pool = true;
+                    }
                     rte_atomic64_inc(&ctx->stats->rx_drop);
                     rte_pktmbuf_free(m);
                     rte_atomic64_inc(&ctx->stats->fqdn[FQDN_UNKNOWN]);
@@ -191,6 +197,11 @@ thread_rx_main(void *arg)
                 item->rx_tsc = rx_tsc;
 
                 if (rte_ring_enqueue(ctx->cls_ring, item) != 0) {
+                    static bool warned_ring = false;
+                    if (!warned_ring) {
+                        RTE_LOG(ERR, MINI_DPI, "rx: classifier ring full, dropping packet\n");
+                        warned_ring = true;
+                    }
                     rte_atomic64_inc(&ctx->stats->rx_drop);
                     rte_mempool_put(ctx->payload_pool, item);
                     rte_pktmbuf_free(m);

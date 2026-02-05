@@ -7,6 +7,9 @@
 
 #include "fqdn_list.h"
 
+/** DPDK log type for this app. */
+#define RTE_LOGTYPE_MINI_DPI RTE_LOGTYPE_USER1
+
 /** Shared runtime counters. */
 struct app_stats {
     rte_atomic64_t rx_pkts;
@@ -34,4 +37,7 @@ struct app_cfg {
     bool list_ports;
     bool print_payloads;
     bool perf;
+    const char *log_file;
+    const char *cfg_file;
+    const char *log_level;
 };
