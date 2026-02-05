@@ -60,6 +60,9 @@ thread_rx_main(void *arg)
             struct rte_ipv4_hdr *ip_hdr = NULL;
             uint32_t l2_len = 0;
             struct rte_ipv6_hdr *ip6_hdr = NULL;
+            uint64_t rx_tsc = rte_get_tsc_cycles();
+
+            rte_atomic64_add(&ctx->stats->rx_bytes, rte_pktmbuf_pkt_len(m));
 
             bool is_ipv4 = (get_ipv4_hdr(m, &ip_hdr, &l2_len) == 0);
             bool is_ipv6 = (!is_ipv4 && get_ipv6_hdr(m, &ip6_hdr, &l2_len) == 0);
@@ -93,13 +96,22 @@ thread_rx_main(void *arg)
                 m->l3_len = ihl_bytes;
 
                 if (rte_ipv4_frag_pkt_is_fragmented(ip_hdr)) {
+                    uint16_t flag_offset = rte_be_to_cpu_16(ip_hdr->fragment_offset);
+                    bool is_last = ((flag_offset & RTE_IPV4_HDR_MF_FLAG) == 0);
+                    rte_atomic64_inc(&ctx->stats->fragments_seen);
                     struct rte_mbuf *reassembled = rte_ipv4_frag_reassemble_packet(
                         frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip_hdr);
 
-                    if (reassembled == NULL)
+                    if (reassembled == NULL) {
+                        if (is_last) {
+                            rte_atomic64_inc(&ctx->stats->frag_timeouts);
+                            rte_atomic64_inc(&ctx->stats->frag_drops);
+                        }
                         continue;
+                    }
 
                     m = reassembled;
+                    rte_atomic64_inc(&ctx->stats->packets_reassembled);
 
                     if (get_ipv4_hdr(m, &ip_hdr, &l2_len) != 0) {
                         rte_pktmbuf_free(m);
@@ -129,13 +141,22 @@ thread_rx_main(void *arg)
 
                 struct rte_ipv6_fragment_ext *frag_hdr = rte_ipv6_frag_get_ipv6_fragment_header(ip6_hdr);
                 if (frag_hdr != NULL) {
+                    uint16_t frag_data = rte_be_to_cpu_16(frag_hdr->frag_data);
+                    bool is_last = (RTE_IPV6_GET_MF(frag_data) == 0);
+                    rte_atomic64_inc(&ctx->stats->fragments_seen);
                     struct rte_mbuf *reassembled = rte_ipv6_frag_reassemble_packet(
                         frag_tbl, &death_row, m, rte_get_tsc_cycles(), ip6_hdr, frag_hdr);
 
-                    if (reassembled == NULL)
+                    if (reassembled == NULL) {
+                        if (is_last) {
+                            rte_atomic64_inc(&ctx->stats->frag_timeouts);
+                            rte_atomic64_inc(&ctx->stats->frag_drops);
+                        }
                         continue;
+                    }
 
                     m = reassembled;
+                    rte_atomic64_inc(&ctx->stats->packets_reassembled);
 
                     if (get_ipv6_hdr(m, &ip6_hdr, &l2_len) != 0) {
                         rte_pktmbuf_free(m);
@@ -167,6 +188,7 @@ thread_rx_main(void *arg)
                 item->payload_offset = payload_offset;
                 item->payload_len = payload_len;
                 item->proto = proto;
+                item->rx_tsc = rx_tsc;
 
                 if (rte_ring_enqueue(ctx->cls_ring, item) != 0) {
                     rte_atomic64_inc(&ctx->stats->rx_drop);

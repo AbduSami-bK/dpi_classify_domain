@@ -1,48 +1,32 @@
 # Implementation Notes
 
-## Design
+## Drops and Timeouts
 
-Main: Spawn other threads.
-Thread_Rx: Ingests vectors of packets and parse up-to IP layer
-Thread_ReAssemble: IPv4 Reassembly -> Merged with Thread_Rx unless more performance is required.
-Thread_Classify: Hyperscan to search payload and increment counters.
-Thread_print: Print stats periodically. -> Merged with main thread.
+- Ring drops occur when the RX thread cannot enqueue a payload item into the classifier ring.
+- Fragment drops/timeouts are tracked when the last fragment arrives but the packet cannot be reassembled.
+  This is a best-effort proxy for missing fragments and timeouts in the ip_frag library.
 
-## Drops
+## Reassembly Approach
 
-[TODO]
+- IPv4: `rte_ipv4_frag_reassemble_packet()` with per-thread frag table.
+- IPv6: `rte_ipv6_frag_reassemble_packet()` when a fragment extension header is present.
+- The reassembly key is managed by DPDK (src/dst/ip_id/proto).
 
-- where drops occur
-- why drops occur
+## Mbuf Lifecycle
 
-## IPv4 Re-Assembly
+- RX thread owns incoming mbufs.
+- After reassembly and L4 parse, the RX thread packages the mbuf in a payload item and enqueues it.
+- Classifier thread scans payloads, optionally prints, then frees the mbuf and payload item.
 
-[TODO]
+## Use of AI
 
-- how re-assembly is implemented
+| Field | Value |
+| --- | --- |
+| Category | Assistant |
+| Name | OpenAI Codex |
+| Methodology | Iterative debugging, refactoring, and documentation updates with owner review |
+| Deliverables | Code fixes, IPv4/IPv6 reassembly, hyperscan integration, build updates, docs |
+| Involvement | High (project handoff for debugging and fixes) |
 
-## `mbuf` Life-Cycle
-
-[TODO]
-
-- mbuf lifecycle decisions
-
-## AI involvement
-
-- Type
-  - Category
-  - Name
-- Usage Methodology
-- Generated Deliverables
-  - mention involvement level
-
-| S.No. | Tool Type | Name | Generated Content in | Methodology / Involvement level |
-| -- | -- | --- | --- | ----- |
-| 1. | Chatbot | ChatGPT 5.2 | main.c | Generate a simple skeleton DPDK app to start working |
-| 2. | Chatbot | DeepSeek | CMakeLists.txt | Convert Makefile from DPDK/examples to CMakeLists.txt |
-| 3. | Chatbot | ?? | None | Asked some details about hyperscan not clear from online documentation |
-| 4. | Chatbot | Gemini 3 | None | Had a discussion for performance of some literal pattern matching search implementations. Mainly hyperscan vs `memmem()`/`strstr()` vs `bash` vs pcre2 etc. |
-| 5. | Chatbot | ChatGPT 5.2 | test_pkt_gen.py | A scapy script to generate IP fragmented packets, with embedded strings |
-| 6. | Chatbot | Gemini 3 | main.c | Discussed about using macros and enum lists for multiple usage types. Learned about the `##` preprocessor string concat and how to use it for this use case. |
-| 7. | Chatbot | Gemini 3 | main.c | Summarize compiler output warnings |
-| 8. | Chatbot & GitHub Copilot in VSCode | GitHub Co-pilot and DeepSeek | Gave up on doing it completely manually with 1 hour remaining in the deadline and tried to get Co-pilot to help me read payload form the packets |
+Note: The project was handed over to the AI assistant for debugging and stabilization,
+which helped resolve issues quickly.

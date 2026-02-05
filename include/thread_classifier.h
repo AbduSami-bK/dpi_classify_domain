@@ -24,6 +24,7 @@ struct payload_item {
     uint32_t payload_offset;
     uint32_t payload_len;
     uint8_t proto;
+    uint64_t rx_tsc;
 };
 
 /** Classifier thread context. */

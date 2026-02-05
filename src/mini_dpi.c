@@ -32,7 +32,7 @@
 
 #define DEFAULT_FRAG_TIMEOUT_MS 30000
 #define DEFAULT_MAX_PRINT 1024
-#define RX_TO_CLASSIFIER_RING_SIZE 4096
+#define DEFAULT_RING_SIZE 4096
 #define PAYLOAD_POOL_SIZE 8192
 
 volatile bool force_quit = false;
@@ -48,7 +48,7 @@ signal_handler(int signum)
 static void
 print_usage(const char *prog)
 {
-    printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--frag-timeout-ms N] [--print-max N] [--print-payloads] [--debug-dump N]\n", prog);
+    printf("Usage: %s [EAL args] -- [--port N] [--auto-port] [--list-ports] [--ring-size N] [--frag-timeout-ms N] [--print-max N] [--print-payloads] [--perf] [--debug-dump N]\n", prog);
 }
 
 static int
@@ -58,9 +58,11 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
         {"port", required_argument, NULL, 'p'},
         {"auto-port", no_argument, NULL, 'a'},
         {"list-ports", no_argument, NULL, 'l'},
+        {"ring-size", required_argument, NULL, 'r'},
         {"frag-timeout-ms", required_argument, NULL, 't'},
         {"print-max", required_argument, NULL, 'm'},
         {"print-payloads", no_argument, NULL, 'P'},
+        {"perf", no_argument, NULL, 'f'},
         {"debug-dump", required_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0}
@@ -81,6 +83,9 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
         case 'l':
             cfg->list_ports = true;
             break;
+        case 'r':
+            cfg->ring_size = (uint32_t)atoi(optarg);
+            break;
         case 't':
             cfg->frag_timeout_ms = (uint32_t)atoi(optarg);
             break;
@@ -89,6 +94,9 @@ parse_app_args(int argc, char **argv, struct app_cfg *cfg)
             break;
         case 'P':
             cfg->print_payloads = true;
+            break;
+        case 'f':
+            cfg->perf = true;
             break;
         case 'd':
             cfg->debug_dump_limit = (uint32_t)atoi(optarg);
@@ -175,18 +183,27 @@ main(int argc, char **argv)
     struct app_cfg cfg = {
         .port_id = 0,
         .frag_timeout_ms = DEFAULT_FRAG_TIMEOUT_MS,
+        .ring_size = DEFAULT_RING_SIZE,
         .max_print_bytes = DEFAULT_MAX_PRINT,
         .debug_dump_limit = 0,
         .auto_port = false,
         .list_ports = false,
         .print_payloads = false,
+        .perf = false,
     };
 
     struct app_stats stats;
     rte_atomic64_init(&stats.rx_pkts);
+    rte_atomic64_init(&stats.rx_bytes);
     rte_atomic64_init(&stats.rx_drop);
     rte_atomic64_init(&stats.worker_in);
     rte_atomic64_init(&stats.worker_out);
+    rte_atomic64_init(&stats.fragments_seen);
+    rte_atomic64_init(&stats.packets_reassembled);
+    rte_atomic64_init(&stats.frag_timeouts);
+    rte_atomic64_init(&stats.frag_drops);
+    rte_atomic64_init(&stats.latency_sum_cycles);
+    rte_atomic64_init(&stats.latency_samples);
     for (unsigned int i = 0; i < FQDN_COUNT; i++)
         rte_atomic64_init(&stats.fqdn[i]);
 
@@ -222,7 +239,7 @@ main(int argc, char **argv)
         rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu16 "\n", cfg.port_id);
 
     struct rte_ring *cls_ring = rte_ring_create(
-        "rx_to_classifier", RX_TO_CLASSIFIER_RING_SIZE,
+        "rx_to_classifier", cfg.ring_size,
         rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     if (cls_ring == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create ring: %s\n", rte_strerror(errno));
@@ -260,13 +277,19 @@ main(int argc, char **argv)
     rte_eal_remote_launch(thread_classifier_main, &cls_ctx, cls_lcore);
 
     printf("Reassembly reader started on port %u\n", cfg.port_id);
-    printf("frag-timeout-ms=%u, print-max=%u bytes\n", cfg.frag_timeout_ms, cfg.max_print_bytes);
+    printf("frag-timeout-ms=%u, print-max=%u bytes, ring-size=%u\n",
+           cfg.frag_timeout_ms, cfg.max_print_bytes, cfg.ring_size);
     printf("payload_print=%s\n", cfg.print_payloads ? "on" : "off");
     if (cfg.debug_dump_limit > 0)
         printf("debug-dump enabled: max %" PRIu32 " packets for non-IPv4 packets\n", cfg.debug_dump_limit);
 
     uint64_t last_tsc = rte_get_tsc_cycles();
     uint64_t tsc_hz = rte_get_tsc_hz();
+
+    uint64_t last_rx = 0;
+    uint64_t last_bytes = 0;
+    uint64_t last_lat_sum = 0;
+    uint64_t last_lat_cnt = 0;
 
     while (!force_quit) {
         uint64_t now = rte_get_tsc_cycles();
@@ -275,11 +298,40 @@ main(int argc, char **argv)
             uint64_t drop = rte_atomic64_read(&stats.rx_drop);
             uint64_t win = rte_atomic64_read(&stats.worker_in);
             uint64_t wout = rte_atomic64_read(&stats.worker_out);
+            uint64_t frags = rte_atomic64_read(&stats.fragments_seen);
+            uint64_t reasmb = rte_atomic64_read(&stats.packets_reassembled);
+            uint64_t fdrop = rte_atomic64_read(&stats.frag_drops);
+            uint64_t fto = rte_atomic64_read(&stats.frag_timeouts);
             printf("rx=%" PRIu64 " drop=%" PRIu64 " worker_in=%" PRIu64 " worker_out=%" PRIu64,
                    rx, drop, win, wout);
+            printf(" frags=%" PRIu64 " reasmb=%" PRIu64 " frag_drop=%" PRIu64 " frag_timeout=%" PRIu64,
+                   frags, reasmb, fdrop, fto);
             for (unsigned int i = 0; i < FQDN_COUNT; i++) {
-                printf(" %s=%" PRIu64, fqdn_name((enum fqdn_id)i),
-                       rte_atomic64_read(&stats.fqdn[i]));
+                /* Only classifier thread writes FQDN counters; relaxed reads are fine.
+                 * If multiple classifier threads are used, make these fully atomic. */
+                uint64_t v = __atomic_load_n(&stats.fqdn[i].cnt, __ATOMIC_RELAXED);
+                printf(" %s=%" PRIu64, fqdn_name((enum fqdn_id)i), v);
+            }
+
+            if (cfg.perf) {
+                uint64_t bytes = rte_atomic64_read(&stats.rx_bytes);
+                uint64_t lat_sum = rte_atomic64_read(&stats.latency_sum_cycles);
+                uint64_t lat_cnt = rte_atomic64_read(&stats.latency_samples);
+                uint64_t delta_pkts = rx - last_rx;
+                uint64_t delta_bytes = bytes - last_bytes;
+                uint64_t delta_lat_sum = lat_sum - last_lat_sum;
+                uint64_t delta_lat_cnt = lat_cnt - last_lat_cnt;
+                double pps = (double)delta_pkts;
+                double gbps = (double)delta_bytes * 8.0 / 1e9;
+                double avg_us = 0.0;
+                if (delta_lat_cnt > 0) {
+                    avg_us = ((double)delta_lat_sum / (double)delta_lat_cnt) * 1e6 / (double)tsc_hz;
+                }
+                printf(" pps=%.0f gbps=%.3f avg_lat_us=%.2f", pps, gbps, avg_us);
+                last_rx = rx;
+                last_bytes = bytes;
+                last_lat_sum = lat_sum;
+                last_lat_cnt = lat_cnt;
             }
             putchar('\n');
             last_tsc = now;

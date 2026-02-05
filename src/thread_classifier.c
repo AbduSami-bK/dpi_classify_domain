@@ -243,6 +243,12 @@ thread_classifier_main(void *arg)
                                        item->payload_offset, item->payload_len,
                                        ctx->stats);
 
+            if (item->rx_tsc != 0) {
+                uint64_t delta = rte_get_tsc_cycles() - item->rx_tsc;
+                rte_atomic64_add(&ctx->stats->latency_sum_cycles, (int64_t)delta);
+                rte_atomic64_inc(&ctx->stats->latency_samples);
+            }
+
             if (ctx->print_payloads) {
                 if (item->proto == IPPROTO_TCP)
                     printf("TCP payload_len=%" PRIu32 ": ", item->payload_len);
