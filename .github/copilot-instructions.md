@@ -1,10 +1,10 @@
 # Copilot Instructions for Mini-DPI
 
-## Project Overview
+## Quick summary
 
-**Mini-DPI** is a DPDK-based packet classification system that reads IPv4 packets, performs IP reassembly, and detects embedded FQDNs (google.com, youtube.com, facebook.com, github.com) using Hyperscan pattern matching.
+Mini-DPI is a DPDK-based IPv4 packet classification app: RX thread ingests packets, a worker performs IPv4 reassembly using DPDK's ip_frag API, and a classifier thread scans payloads for hard-coded FQDNs (Hyperscan optional). Communication between threads is via lock‑free `rte_ring` queues.
 
-### Core Architecture
+## Architecture & important patterns 🔧
 
 - **Multi-threaded DPDK application** using lock-free `rte_ring` queues for inter-thread communication
 - **RX Thread**: Ingests packets from network interfaces, parses IP headers, identifies fragmentation
@@ -14,6 +14,7 @@
 ## Key Dependencies & Building
 
 ### Required Tools
+
 - DPDK 25.11+ (libdpdk-dev)
 - CMake 3.26.5+
 - GCC 11.5.0+
@@ -21,6 +22,7 @@
 - Ragel 7.0.0.12, RDMA-Core-devel, Boost 1.75+
 
 ### Build Workflow
+
 ```bash
 mkdir build && cd build
 cmake -G Ninja ..        # Uses DeepSeek-converted CMakeLists.txt
@@ -32,9 +34,15 @@ ninja                    # Produces build/mini_dpi, build/mini_dpi-shared, build
 - Debug flags: `-O0 -g -g3 -ggdb -pg`; Release: `-O3`
 - Output directory: `${CMAKE_BINARY_DIR}/build/`
 
+**Build gotchas (practical tips):**
+- Add `${CMAKE_SOURCE_DIR}/include` to `target_include_directories()` so project headers like `thread_rx.h` resolve.
+- DPDK headers may use `ssize_t`; include `<sys/types.h>` in files that include DPDK headers to avoid errors.
+- If linker errors say undefined references, ensure the .c implementing the function is added to `SRCS-y` in `CMakeLists.txt`.
+
 ## Critical Architecture Patterns
 
 ### 1. mbuf (Memory Buffer) Lifecycle
+
 - **Creation**: Allocated in pool (`rte_pktmbuf_pool_create`) during initialization
 - **RX**: Bursts received via `rte_eth_rx_burst(MAX_PKT_BURST=32)`
 - **Enqueue**: Pushed to `ring_rx_to_worker` via `rte_ring_enqueue_burst()` (drop if full)
@@ -42,6 +50,7 @@ ninja                    # Produces build/mini_dpi, build/mini_dpi-shared, build
 - **Critical**: Unowned mbufs cause memory leaks; all paths must free (success, drop, timeout, malformed)
 
 ### 2. IPv4 Reassembly Strategy
+
 - **Trigger**: `DF==0 && (MF==1 || fragment_offset != 0)`
 - **Key**: `(src_ip, dst_ip, ip_id, protocol)` for identifying fragments
 - **Out-of-order handling**: Keep unordered fragments; merge on arrival of missing offsets
@@ -50,6 +59,7 @@ ninja                    # Produces build/mini_dpi, build/mini_dpi-shared, build
 - **Track stats**: `fragments_seen`, `packets_reassembled`, `frag_timeouts`, `frag_drops`
 
 ### 3. Pattern Matching & FQDN Detection
+
 - **Engine**: Hyperscan (`hs_scan_vector()` for multi-segment mbufs)
 - **Compiled patterns**: Hard-coded strings (google.com, youtube.com, facebook.com, github.com)
 - **Callback**: `match_found()` increments counter, receives match ID & payload position
@@ -57,6 +67,7 @@ ninja                    # Produces build/mini_dpi, build/mini_dpi-shared, build
 - **Multi-segment handling**: Hyperscan API handles non-contiguous mbuf chains
 
 ### 4. Macro-based FQDN Configuration (X-Macro Pattern)
+
 ```c
 #define FQDN_LIST \
     X(GOOGLE,   "google.com",   "Google") \
@@ -74,19 +85,20 @@ static const char *fqdn_list[] = { #define X(id, str, name) str, FQDN_LIST #unde
 ## Development Workflows
 
 ### Testing
-- **Unit tests**: [test/unit_tests.c](test/unit_tests.c) (incomplete, marked [TODO])
+
 - **Packet generation**: [test/test_pkt_gen.py](test/test_pkt_gen.py) generates fragmented IPv4 packets with embedded FQDNs (ChatGPT 5.2, Scapy-based)
-- **Test data**: [test/test.pcapng](test/test.pcapng), [corner_cases.pcap](corner_cases.pcap)
 
 ### Common Commands
+
 - **Run from pcap**: `./build/build/mini_dpi --vdev net_pcap0,rx_pcap=/path/to/file.pcap`
 - **Run from interface**: `./build/build/mini_dpi --vdev net_af_packet0,iface=ens9 -l 0`
 - **Port binding**: Requires `vfio_pci` driver binding; adjust EAL args `-l` (lcores) and `-a` (port address)
 - **Graceful exit**: Ctrl+C (SIGINT/SIGTERM), prints final stats
 
 ### Configuration
+
 - [config/config.yaml](config/config.yaml): Log level only (0=Debug to 7=Error)
-- TODO: Move hard-coded FQDNs to config file (v0.9 milestone)
+- TODO: Move hard-coded FQDNs (currently in `include/fqdn_list.h`) to a runtime YAML configuration for easier updates.
 
 ## Code Style & Patterns
 
@@ -101,8 +113,8 @@ These sections require implementation before v1.0:
 
 1. **[docs/implementation_notes.md](docs/implementation_notes.md)**: Document "Drops" (where/why), reassembly algorithm details, mbuf lifecycle decisions
 2. **Config file integration**: Move FQDNs from macros to YAML (v0.9)
-3. **Thread implementations**: [src/thread_rx.c](src/thread_rx.c) and [src/thread_classifier.c](src/thread_classifier.c) are stubs; fill in core loops
-4. **Unit test completion**: [test/unit_tests.c](test/unit_tests.c) needs fragmentation, timeout, and counter tests
+3. **Thread implementations**: Worker (`src/thread_rx.c`) and classifier (`src/thread_classifier.c`) are implemented. Classifier supports Hyperscan (when built with `USE_HYPERSCAN`) and falls back to `memmem` if not available.
+4. **Unit test completion**: `test/unit_tests.c` is scaffolded; add cases for fragmentation, timeouts, reassembly, and counter correctness. Consider adding a CI job to run a smoke test using `test/test.pcap`.
 5. **Performance testing**: Benchmark throughput, latency, drop rate
 
 ## External References
