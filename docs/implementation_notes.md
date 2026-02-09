@@ -3,8 +3,8 @@
 ## Drops and Timeouts
 
 - Ring drops occur when the RX thread cannot enqueue a payload item into the classifier ring.
-- Fragment drops/timeouts are tracked when the last fragment arrives but the packet cannot be reassembled.
-  This is a best-effort proxy for missing fragments and timeouts in the ip_frag library.
+- Payload pool drops occur when the RX thread cannot allocate a payload item.
+- Fragment drops/timeouts are tracked from the ip_frag death row (fragments expired and freed).
 
 ## Reassembly Approach
 
@@ -28,5 +28,4 @@
 | Deliverables | Code fixes, IPv4/IPv6 reassembly, hyperscan integration, build updates, docs |
 | Involvement | High (project handoff for debugging and fixes) |
 
-Note: The project was handed over to the AI assistant for debugging and stabilization,
-which helped resolve issues quickly.
+Note: The project was handed over to the AI assistant for debugging and stabilization.
