@@ -14,6 +14,7 @@ and classifies them by FQDN using Hyperscan (or memmem fallback).
 ## Build
 
 ```bash
+sudo dnf install gcc gcc-c++ cmake ninja-build pkgconfig hyperscan hyperscan-devel
 mkdir -p build
 cd build
 cmake -G Ninja ..
