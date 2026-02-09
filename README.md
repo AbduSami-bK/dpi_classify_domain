@@ -1,52 +1,67 @@
 # Mini-DPI
 
-This is a mini DPI project, done as a hiring task for a firm.
-The program reads IP packets and counts the packets related to four hard-coded websites.
+A minimal DPDK-based DPI pipeline that reassembles IPv4/IPv6 packets, extracts TCP/UDP payloads,
+and classifies them by FQDN using Hyperscan (or memmem fallback).
 
-## Pre-requisites
+## Features
 
-This program is built using:
+- DPDK RX + multi-core pipeline
+- IPv4 + IPv6 reassembly (ip_frag)
+- TCP/UDP payload scanning (first 256 bytes)
+- Hyperscan support (system package preferred)
+- Performance stats (pps, gbps, avg latency)
 
-- DPDK  25.11.
-- CMake 3.26.5
-- GCC   11.5.0
-- OS    Rocky Linux 9.7
-- Linux Kernel  5.14.0-611
-- libc  2.34
-- Boost 1.75 (>= 1.61)
-- Ragel 7.0.0.12
-- RDMA-Core-devel (Lib-ibVerbs) 57.0
-
-Make sure your system has these or later versions of these.
-Commands to check versions:
+## Build
 
 ```bash
-cmake --version
-gcc --version
-cat /etc/os-release
-ldd --version
-dnf list installed kernel boost-devel ragel rdma-core-devel
+mkdir -p build
+cd build
+cmake -G Ninja ..
+ninja
 ```
 
-Tested with vfio_pci on "82540EM Gigabit Ethernet Controller 100e" by libvirtd (non-iommu mode)
+## Run
 
-## How to build
+```bash
+./build/build/mini_dpi -l 0-2 --vdev 'net_pcap0,rx_pcap=test/test.pcap' \
+  -- --port 0 --ring-size 4096 --frag-timeout-ms 30000
+```
 
-[TODO] _exact build commands_
+```bash
+./build/build/mini_dpi -l 0-2 --vdev 'net_af_packet0,iface=eth0' \
+  -- --port 0 --ring-size 4096 --frag-timeout-ms 30000
+```
 
-1. Make sure all the listed pre-requisites are installed in you system. The listed version or later.
-2. Setup DPDK
-    1. Hugepages
-    2. [Optional] Isolate CPUs for performance
-        1. Reboot
-    3. Bind interfaces.
-3. `mkdir build`
-5. `cd build`
-4. `cmake -G Ninja ..`
-6. `ninja`
+## App Args
 
-## How to run
+- `--port N` DPDK port (default 0)
+- `--port-mask HEX` port mask (must select exactly one port)
+- `--ring-size N` ring size between RX and classifier
+- `--frag-timeout-ms N` reassembly timeout
+- `--print-payloads` print TCP/UDP payloads
+- `--print-max N` limit payload print bytes
+- `--perf` print pps/gbps/avg latency
+- `--debug-dump N` dump first N non-IPv4/IPv6 packets (debug)
 
-- `./build/build/dpi_classify_domain -l 0 -a 00:09.0`
-- `./build/build/dpi_classify_domain -l 0 --vdev net_af_packet0,iface=ens9`
-- Ctrl+C to close.
+When `--perf` is enabled, the app exits after ~1M classified packets and prints a final summary.
+
+## DPDK Setup Notes
+
+- Allocate hugepages and mount hugetlbfs (required for most DPDK PMDs).
+- Bind NICs to DPDK-compatible drivers where needed.
+- Ensure your user has permission to access hugepages and NICs.
+
+## Notes
+
+- Use `-l 0-2` to enable main + RX + classifier cores.
+- Hyperscan uses system packages when available.
+
+## Dependencies
+
+- DPDK (>= 22.11)
+- GCC, CMake, Ninja
+- Hyperscan (optional)
+
+## Licenses
+
+See `LICENSE` and `NOTICE.md`.

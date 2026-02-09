@@ -14,6 +14,7 @@ SRC_IP6 = "2001:db8::1"
 DST_IP6 = "2001:db8::2"
 
 stats = {
+    "total_fragments": 0,
     "total_packets": 0,
     "Google": 0,
     "FB": 0,

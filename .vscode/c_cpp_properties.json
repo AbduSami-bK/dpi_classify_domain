@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "name": "Rocky9",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/hyperscan/include"
+            ],
+            "cStandard": "c11",
+            "compilerPath": "/usr/lib64/ccache/gcc"
+        }
+    ],
+    "version": 4
+}

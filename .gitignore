@@ -3,5 +3,7 @@ build
 *.out
 *.log
 cscope.out*
-test/test.pcap
-test/test.pcapng
+ncscope.out*
+test/*.pcap
+test/*.pcapng
+test/std*.txt

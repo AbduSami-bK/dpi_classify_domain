@@ -1,0 +1,4 @@
+#pragma once
+
+#define GIT_HASH "@GIT_HASH@"
+#define BUILD_TIMESTAMP "@CMAKE_SYSTEM_TIME@"
